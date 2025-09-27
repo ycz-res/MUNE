@@ -1,0 +1,18 @@
+# MUNE深度学习训练框架配置文件
+  
+# 数据集文件配置
+SimDataset:
+  path: ./data/SimDataset
+  train: ./data/SimDataset/train_dataset1_HP_better_range_1000.mat
+  val: ./data/SimDataset/val_dataset1_HP_better_range_1000.mat
+  control: ./data/SimDataset/real_data_control.mat
+  sci: ./data/SimDataset/real_data_sci.mat
+  data: ./data/SimDataset/data.mat
+
+
+
+
+
+
+
+
