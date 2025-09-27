@@ -13,27 +13,27 @@ class LinearModel(nn.Module):
     """
     线性模型：用于MU数量回归和阈值预测
     
-    输入: (batch_size, 500, 2) - 500个(x,y)坐标点
+    输入: (batch_size, 500) - 500个纵坐标点
     输出: 
         - count_pred: (batch_size, 1) - MU数量回归预测
-        - thresholds: (batch_size, max_thresholds) - 阈值预测
+        - thresholds: (batch_size, 1) - 单个阈值预测
     """
-    def __init__(self, d_model=64, max_thresholds=160):
+    def __init__(self, d_model=64, max_thresholds=1):
         super().__init__()
-        self.encoder = nn.Linear(2, d_model)  
+        self.encoder = nn.Linear(500, d_model)  # 输入500个点
         self.fc = nn.Linear(d_model, d_model)
         
         # head1: 预测 count (回归)
         self.count_head = nn.Linear(d_model, 1)  # 回归预测MU数量
         
-        # head2: 预测阈值 (固定数量)
-        self.threshold_head = nn.Linear(d_model, max_thresholds)
+        # head2: 预测阈值 (单个阈值)
+        self.threshold_head = nn.Linear(d_model, 1)  # 预测单个阈值
     
     def forward(self, x):
-        # x: [B, 500, 2]
-        feat = self.encoder(x).mean(dim=1)   # (B, d_model)，全局特征
+        # x: [B, 500] - 500个纵坐标点
+        feat = self.encoder(x)   # (B, d_model)，全局特征
         feat = self.fc(feat)
         
         nus = self.count_head(feat)        # (B, 1) - 回归预测MU数量
-        thresholds = self.threshold_head(feat)    # (B, max_thresholds) - 预测阈值
+        thresholds = self.threshold_head(feat)    # (B, 1) - 预测单个阈值
         return nus, thresholds
