@@ -1,6 +1,5 @@
 import torch
 import numpy as np
-import h5py
 from torch.utils.data import Dataset
 from typing import List, Tuple, Dict, Any
 from utils import load_mat_data
@@ -64,98 +63,63 @@ class SimDataset(Dataset):
     def __load_sim_data(self):
         """加载仿真数据并进行预处理"""
         # 加载.mat数据文件
-        mat_file = h5py.File(self.data_path, 'r')
-        print(f"MAT文件键值: {list(mat_file.keys())}")
+        mat_data = load_mat_data(self.data_path)
+        print(f"MAT文件键值: {list(mat_data.keys())}")
         
-        # 提取主要数据
-        X_load, Y_load = mat_file['data'], mat_file['label_num']
-        X_load, Y_load = np.array(X_load).transpose(2, 1, 0)[:, :, 1].squeeze(), np.array(Y_load).squeeze()
+        # 使用_preprocess进行完整的数据预处理
+        processed_data = self.__preprocess(mat_data['data'])
         
-        # 截断：从5个unit开始预测
-        index = Y_load.squeeze() >= 5
-        X_load, Y_load = X_load[index,], Y_load[index]
-        
-        print(f"截断后数据形状: X={X_load.shape}, Y={Y_load.shape}")
-        
-        # 预处理 (排序->归一化)
-        X = self._preprocess(X_load, Y_load, np.array([0, 1, 2]), True)
+        # 提取标签数据
+        Y_load = mat_data['label_num']
+        Y_load = np.array(Y_load).squeeze()
         
         # 提取阈值数据
-        thr_load = mat_file['label_thr']
-        thr_load = np.array(thr_load).squeeze()[index]
+        thr_load = mat_data['label_thr']
+        thr_load = np.array(thr_load).squeeze()
         
-        # 获取数据维度信息
-        x_len_ = X.shape[-1]  # 500个点
-        x_dim_ = 1  # 只有纵坐标，所以是1维
+        # 将单个阈值扩展为160维向量（用0填充）
+        y4_expanded = np.zeros((len(thr_load), 160), dtype=np.float32)
+        y4_expanded[:, 0] = thr_load  # 第一个位置放实际阈值
         
         # 数据类型转换
         y1 = Y_load.astype(np.float32)  # MU数量
-        y4 = thr_load.astype(np.float32)  # 阈值
+        y4 = y4_expanded  # 160维阈值向量
         
-        # 关闭文件
-        mat_file.close()
-        
-        # 返回处理后的数据
+        # 构建结果字典
         result = {
-            'data': X,  # shape: (N, 500) - 500个点的纵坐标
+            'data': processed_data,  # shape: (N, 500) - 500个点的纵坐标
             'label_num': y1,  # MU数量 (N,)
             'muThr': y4,  # 阈值数据 (N,)
-            'x_len': x_len_,  # 输入长度 (500)
-            'x_dim': x_dim_,  # 输入维度 (1)
-            'num_samples': len(X)  # 样本数量
+            'x_len': processed_data.shape[-1],  # 输入长度 (500)
+            'x_dim': 1,  # 输入维度 (1)
+            'num_samples': len(processed_data)  # 样本数量
         }
         
         print(f"数据预处理完成:")
         print(f"  - 样本数量: {result['num_samples']}")
-        print(f"  - 输入形状: {X.shape}")
+        print(f"  - 输入形状: {processed_data.shape}")
         print(f"  - MU数量范围: [{y1.min():.1f}, {y1.max():.1f}]")
         
         return result
     
-    def _preprocess(self, image_data: np.ndarray, labels: np.ndarray, orders: np.ndarray, tmp_flag: bool) -> np.ndarray:
-        """
-        数据预处理函数（排序+归一化）
-        
-        Args:
-            image_data: 图像数据 (N, 500) - N个样本，每个样本500个点的纵坐标
-            labels: 标签数据 (N,)
-            orders: 预处理阶数
-            tmp_flag: 临时标志
-        
-        Returns:
-            处理后的数据 (N, 500)
-        """
-        print(f"预处理前数据形状: {image_data.shape}")
-        
-        # 1. 对每个样本的纵坐标进行排序
-        sorted_data = np.zeros_like(image_data)
-        
-        for i in range(image_data.shape[0]):  # 遍历每个样本
-            sample_y = image_data[i, :]  # shape: (500,)
-            # 对纵坐标进行排序
-            sorted_indices = np.argsort(sample_y)
-            sorted_data[i, :] = sample_y[sorted_indices]
-        
-        print(f"排序后数据形状: {sorted_data.shape}")
-        
-        # 2. 对每个样本的纵坐标进行归一化
-        normalized_data = np.zeros_like(sorted_data)
-        
-        for i in range(sorted_data.shape[0]):  # 遍历每个样本
-            sample_y = sorted_data[i, :]  # shape: (500,)
-            
-            # 对纵坐标进行Z-score归一化
-            if np.std(sample_y) > 0:  # 避免除零
-                normalized_y = (sample_y - np.mean(sample_y)) / np.std(sample_y)
-            else:
-                normalized_y = sample_y - np.mean(sample_y)
-            
-            normalized_data[i, :] = normalized_y
-        
-        print(f"归一化后数据形状: {normalized_data.shape}")
-        print(f"归一化后纵坐标范围: [{normalized_data.min():.3f}, {normalized_data.max():.3f}]")
-        
-        return normalized_data
+    def __preprocess(self, data):
+        N, P, _ = data.shape
+        Y_norm = np.zeros((N, P), dtype=np.float32)
+
+        for i in range(N):
+            x, y = data[i, :, 0], data[i, :, 1]
+
+            # Step 1: 按x排序
+            idx = np.argsort(x)
+            y = y[idx]
+
+            # Step 2: y归一化 (样本内 [0,1])
+            y = (y - y.min()) / (y.max() - y.min() + 1e-8)
+
+            # 保存
+            Y_norm[i] = y
+
+        return Y_norm
     
     def __load_real_data(self):
         """加载真实数据"""
@@ -192,11 +156,11 @@ class SimDataset(Dataset):
         
         # 获取阈值数据
         if self.muThr is not None:
-            # muThr 形状是 (N,)，获取单个阈值
-            muThr = self.muThr[actual_idx]  # 标量值
-            sample_muThr = torch.tensor(muThr, dtype=torch.float32)
+            # muThr 形状是 (N, 160)，获取160维阈值向量
+            muThr = self.muThr[actual_idx]  # 160维向量
+            sample_muThr = torch.from_numpy(muThr).float()
         else:
-            sample_muThr = torch.tensor([-1], dtype=torch.float32)
+            sample_muThr = torch.zeros(160, dtype=torch.float32)
         
         return sample_data, sample_label, sample_muThr
 
@@ -207,7 +171,7 @@ class SimDataset(Dataset):
         
         数据格式:
             src: (batch_size, 500) - 500个点的纵坐标
-            tgt: (batch_size, 2) - [MU数量, 阈值]
+            tgt: (batch_size, 161) - [MU数量(1维), 阈值(160维)]
         """
         # 分离数据、标签和阈值
         data_list, label_list, muThr_list = zip(*batch)
@@ -216,9 +180,9 @@ class SimDataset(Dataset):
         # src: 数据集合
         src = torch.stack(data_list, dim=0)
         
-        # tgt: 简单的双输出 [MU数量, 阈值]
+        # tgt: [MU数量, 160维阈值向量]
         tgt = torch.stack([
-            torch.stack([label, muThr]) for label, muThr in zip(label_list, muThr_list)
+            torch.cat([label.unsqueeze(0), muThr]) for label, muThr in zip(label_list, muThr_list)
         ], dim=0)
 
         print(f"src: {src.shape}, tgt: {tgt.shape}")

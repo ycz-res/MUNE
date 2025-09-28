@@ -320,7 +320,7 @@ def generate_comprehensive_training_visualization(epochs, train_losses, val_loss
     🎯 训练质量评估:
     • 收敛性: {'良好' if train_range < 1.0 else '需改进'}
     • 过拟合: {'轻微' if abs(final_overfitting) < 0.5 else '明显'}
-    • 稳定性: {'稳定' if max(abs(x) for x in train_diff[-5:]) < 0.1 else '波动'}
+           • 稳定性: {'稳定' if len(train_diff) > 0 and max(abs(x) for x in train_diff[-5:]) < 0.1 else '波动'}
     """
     
     ax7.text(0.05, 0.95, stats_text, transform=ax7.transAxes, 
@@ -371,7 +371,7 @@ def generate_comprehensive_training_visualization(epochs, train_losses, val_loss
         recommendations.append("🔧 建议增加正则化或减少模型复杂度")
     if train_range > 2.0:
         recommendations.append("📉 建议降低学习率或增加批次大小")
-    if max(abs(x) for x in train_diff[-5:]) > 0.2:
+    if len(train_diff) > 0 and max(abs(x) for x in train_diff[-5:]) > 0.2:
         recommendations.append("⚡ 建议使用学习率调度器")
     if best_val_loss > best_train_loss * 1.5:
         recommendations.append("🎯 建议增加训练数据或数据增强")
