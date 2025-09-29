@@ -179,19 +179,14 @@ class SimDataset(Dataset):
             
         Returns:
             Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
-                - src: {"cmap": tensor} - CMAP幅值波形数据，形状(batch_size, 500)
-                - tgt: {"mus": tensor, "thresholds": tensor} - MUs数量和thresholds分离
-                
-        Note:
-            输出格式：
-            - src: {"cmap": tensor} (batch_size, 500) - CMAP数据
-            - tgt: {"mus": tensor, "thresholds": tensor} - MUs(batch_size,) + thresholds(batch_size, 500)
+                - src: {"cmap": tensor} - CMAP数据，形状(batch_size, 500)
+                - tgt: {"mus": tensor, "thresholds": tensor} - MUs数量和阈值数据
         """
         # 解包批次数据
         cmap_data_list, mu_counts_list, threshold_data_list = zip(*batch)
         
         # 构建src: {"cmap": tensor}格式
-        src = {"cmap": torch.stack(cmap_data_list, dim=0)}
+        src = {"cmap": torch.stack(cmap_data_list, dim=0)}  # (batch_size, 500) - CMAP数据
         
         # 构建tgt: {"mus": tensor, "thresholds": tensor}格式
         tgt = {
