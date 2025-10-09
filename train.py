@@ -53,9 +53,10 @@ def main(args):
     os.makedirs(args.save_dir, exist_ok=True)
     
     Dataset = eval(args.dataset_type)
-    train_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.0, end_percent=0.05, stage='train', threshold_mode=args.threshold_mode)
-    val_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.05, end_percent=0.1, stage='val', threshold_mode=args.threshold_mode)
-    test_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.1, end_percent=0.15, stage='test', threshold_mode=args.threshold_mode)
+    # 数据划分比例：训练集90%，验证集5%，测试集5%
+    train_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.0, end_percent=0.9, stage='train', threshold_mode=args.threshold_mode)
+    val_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.9, end_percent=0.95, stage='val', threshold_mode=args.threshold_mode)
+    test_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.95, end_percent=1.0, stage='test', threshold_mode=args.threshold_mode)
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
                              collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 

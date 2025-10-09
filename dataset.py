@@ -53,7 +53,7 @@ class Sim(Dataset):
     def __load_sim_data(self):
         """加载仿真数据并进行预处理"""
         mat_data = load_mat_data(self.data_path)
-        print(f"MAT文件键值: {list(mat_data.keys())}")
+        # print(f"MAT文件键值: {list(mat_data.keys())}")
         
         # Step1: 归一化CMAP幅值数据 (N,500)
         cmap_normalized = self._normalize_cmap_data(mat_data['data'])
