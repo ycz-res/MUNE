@@ -1,40 +1,96 @@
-"""
-深度学习模型定义模块
-支持多种模型架构，易于扩展
-"""
-
 import torch
 import torch.nn as nn
-from typing import Dict, Any, Optional
-from abc import ABC, abstractmethod
 
 
-class LinearModel(nn.Module):
+class Linear(nn.Module):
     """
-    线性模型：用于阈值位置预测 - 优化版本
-    
-    输入: (batch_size, 500) - 500个CMAP纵坐标点
-    输出: (batch_size, 500) - 500维阈值位置预测
+    简单线性网络：用于 CMAP → 阈值位置预测
+
+    输入:
+        x: (batch_size, 500)
+            每个样本的 CMAP 曲线幅值序列
+
+    输出:
+        logits: (batch_size, 500)
+            未经过 sigmoid 的阈值预测分数（logits）
+            - 训练阶段: 直接给 BCEWithLogitsLoss 或 FocalLoss
+            - 推理阶段: 由外部脚本控制 sigmoid / 可视化
     """
-    def __init__(self, d_model=64):
+    def __init__(self, d_model: int = 128):
         super().__init__()
-        self.encoder = nn.Linear(500, d_model)  # 输入500个点
-        self.fc = nn.Linear(d_model, d_model)
         
-        # 预测500维阈值位置
-        self.threshold_head = nn.Linear(d_model, 500)  # 输出500维阈值数据
+        self.encoder = nn.Sequential(
+            nn.Linear(500, d_model),
+            nn.ReLU(),
+            nn.Linear(d_model, d_model),
+            nn.ReLU(),
+        )
+
+        self.threshold_head = nn.Linear(d_model, 500)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        feat = self.encoder(x)
+        logits = self.threshold_head(feat)  # (batch_size, 500)
+        return logits
+
+class CNN(nn.Module):
+    """
+    CNN模型：基于局部卷积特征提取
+    输入:
+        x: (batch_size, 500)
+    输出:
+        logits: (batch_size, 500)
+    """
+    def __init__(self, d_model: int = 64):
+        super().__init__()
         
-        # 使用Sigmoid + 阈值化来确保稀疏性
-        self.sigmoid = nn.Sigmoid()
-        self.threshold = 0.1  # 降低阈值，让模型有机会输出非零值
+        self.conv_net = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=5, padding=2),  # [B, 1, 500] → [B, 32, 500]
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+
+            nn.Conv1d(32, 64, kernel_size=5, padding=2), # [B, 32, 500] → [B, 64, 500]
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+
+            nn.Conv1d(64, d_model, kernel_size=3, padding=1), # [B, 64, 500] → [B, d_model, 500]
+            nn.ReLU()
+        )
+
+        self.output_head = nn.Conv1d(d_model, 1, kernel_size=1)  # [B, d_model, 500] → [B, 1, 500]
     
-    def forward(self, x):
-        # x: [batch_size, 500] - 500个CMAP纵坐标点
-        feat = self.encoder(x)   # (batch_size, d_model)，全局特征
-        feat = self.fc(feat)     # 进一步特征提取
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(1)             # [B, 500] → [B, 1, 500]
+        feat = self.conv_net(x)        # [B, d_model, 500]
+        logits = self.output_head(feat).squeeze(1)  # [B, 500]
+        return logits
+
+class LSTM(nn.Module):
+    """
+    LSTM模型：用于捕获CMAP序列的动态变化
+    输入:
+        x: (batch_size, 500)
+    输出:
+        logits: (batch_size, 500)
+    """
+    def __init__(self, d_model: int = 128, num_layers: int = 2, bidirectional: bool = True):
+        super().__init__()
         
-        # 使用Sigmoid输出概率，然后阈值化
-        prob = self.sigmoid(self.threshold_head(feat))  # (batch_size, 500) - 概率输出
-        thresholds = prob * (prob > self.threshold).float()  # 阈值化，只保留高概率位置
+        self.hidden_dim = d_model
+        self.num_directions = 2 if bidirectional else 1
         
-        return thresholds
+        self.lstm = nn.LSTM(
+            input_size=1,
+            hidden_size=d_model,
+            num_layers=num_layers,
+            batch_first=True,
+            bidirectional=bidirectional,
+        )
+
+        self.fc = nn.Linear(d_model * self.num_directions, 1)  # 每个时间步输出1个logit
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.unsqueeze(-1)  # [B, 500] → [B, 500, 1]
+        lstm_out, _ = self.lstm(x)  # [B, 500, d_model * num_directions]
+        logits = self.fc(lstm_out).squeeze(-1)  # [B, 500]
+        return logits

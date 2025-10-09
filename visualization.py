@@ -11,6 +11,10 @@ import matplotlib
 from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import torch
+import warnings
+
+# 屏蔽中文字体警告
+warnings.filterwarnings('ignore', category=UserWarning, message='.*Glyph.*missing from font.*')
 
 # 尝试导入可选依赖
 try:
