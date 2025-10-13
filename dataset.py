@@ -4,6 +4,8 @@ import numpy as np
 from torch.utils.data import Dataset
 from typing import List, Tuple, Dict, Any
 from utils import load_mat_data
+import h5py
+
 
 
 class Sim(Dataset):
@@ -52,7 +54,7 @@ class Sim(Dataset):
 
     def __load_sim_data(self):
         """加载仿真数据并进行预处理"""
-        mat_data = load_mat_data(self.data_path)
+        mat_data = load_mat_data(self.data_path, lazy=False)
         # print(f"MAT文件键值: {list(mat_data.keys())}")
         
         # Step1: 归一化CMAP幅值数据 (N,500)
@@ -163,34 +165,55 @@ class Sim(Dataset):
     
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        获取单个样本数据
+        获取单个样本数据（自动适配大文件懒加载）
         
         Args:
-            idx: 样本索引（相对于当前数据范围的索引）
-            
+            idx (int): 样本索引（相对于当前数据范围的索引）
+        
         Returns:
             Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-                - cmap_data: CMAP幅值数据，形状(500,)
-                - mu_count: 运动单位数量标签，标量
-                - threshold_data: 运动单位阈值数据，形状(500,)
+                - cmap_data: CMAP幅值数据 (500,)
+                - mu_count: 运动单位数量标签 (标量)
+                - threshold_data: 运动单位阈值数据 (500,)
         """
+
         # 验证索引范围
         if not (0 <= idx < self.num_samples):
             raise IndexError(f"索引 {idx} 超出范围 [0, {self.num_samples})")
-        
-        # 转换为实际的数据索引
+
+        # 转换为全局索引
         actual_idx = self.start_idx + idx
-        
-        # 获取CMAP幅值数据
-        cmap_data = torch.from_numpy(self.cmap_amplitudes[actual_idx, :]).float()
-        
-        # 获取运动单位数量标签
-        mu_count = torch.tensor(self.mu_count_labels[actual_idx], dtype=torch.float32)
-        
-        # 获取运动单位阈值数据
-        threshold_data = torch.from_numpy(self.mu_thresholds[actual_idx, :]).float()
-        
+
+        # 检查是否是大文件（h5py.Dataset）
+        if isinstance(self.data_dict["data"], h5py.Dataset):
+            # ---- 大文件懒加载模式 ----
+            # 从 HDF5 数据中读取单个样本
+            data_item = np.array(self.data_dict["data"][actual_idx])  # (500, 2)
+            mu_count_val = np.array(self.data_dict["label_num"][actual_idx]).astype(np.float32)
+            mu_thr_item = np.array(self.data_dict["muThr"][actual_idx]).astype(np.float32)
+
+            # 提取电流 (x) 与 幅值 (y)
+            x = data_item[:, 0]
+            y = data_item[:, 1]
+
+            # 归一化幅值到 [0,1]
+            y = (y - y.min()) / (y.max() - y.min() + 1e-8)
+            cmap_data = torch.from_numpy(y).float()
+
+            # MU数量标签
+            mu_count = torch.tensor(mu_count_val, dtype=torch.float32)
+
+            # 阈值数据（500维映射）
+            threshold_data = torch.from_numpy(mu_thr_item).float()
+
+        else:
+            # ---- 小文件内存模式 ----
+            cmap_data = torch.from_numpy(self.cmap_amplitudes[actual_idx, :]).float()
+            mu_count = torch.tensor(self.mu_count_labels[actual_idx], dtype=torch.float32)
+            threshold_data = torch.from_numpy(self.mu_thresholds[actual_idx, :]).float()
+
         return cmap_data, mu_count, threshold_data
+
 
     @staticmethod
     def collate_fn(batch: List[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
