@@ -53,34 +53,54 @@ class Sim(Dataset):
             raise ValueError(f"不支持的数据类型: {data_type}")
 
     def __load_sim_data(self):
-        """加载仿真数据并进行预处理"""
+        """加载仿真数据并进行预处理（自动修复MATLAB转置维度）"""
+        import numpy as np
+
         mat_data = load_mat_data(self.data_path, lazy=False)
-        # print(f"MAT文件键值: {list(mat_data.keys())}")
-        
-        # Step1: 归一化CMAP幅值数据 (N,500)
-        cmap_normalized = self._normalize_cmap_data(mat_data['data'])
-        
-        # Step2: 加载运动单位数量标签
-        mu_counts = np.array(mat_data['label_num']).squeeze().astype(np.float32)
-        
-        # Step3: 加载原始运动单位阈值
-        mu_thresholds_raw = np.array(mat_data['muThr']).squeeze()
+        print(f"📂 加载数据文件: {self.data_path}")
+        print(f"🔑 包含变量: {list(mat_data.keys())}")
 
-        # Step4: 将阈值映射到 x 轴对应的位置
-        mu_thresholds_aligned = self._map_mu_thresholds(mat_data['data'], mu_thresholds_raw)  # (N, 500)
+        # ========== Step 1. 修正维度顺序 ==========
+        data = np.array(mat_data["data"])
+        label_num = np.array(mat_data["label_num"]).squeeze()
+        muThr = np.array(mat_data["muThr"])
 
+        # ⚠️ 如果维度是 (2,500,780000) 则说明被转置了
+        if data.shape[0] < data.shape[-1]:
+            print(f"⚙️ 检测到维度反转: data.shape={data.shape} → 自动转置中...")
+            data = np.transpose(data, (2, 1, 0))  # (2,500,780000) → (780000,500,2)
 
+        if muThr.shape[0] < muThr.shape[-1]:
+            print(f"⚙️ muThr 转置: {muThr.shape} → {muThr.T.shape}")
+            muThr = muThr.T  # (160,780000) → (780000,160)
+
+        if label_num.ndim == 2 and label_num.shape[0] < label_num.shape[1]:
+            print(f"⚙️ label_num 转置: {label_num.shape} → {label_num.T.shape}")
+            label_num = label_num.T.squeeze()  # (1,780000) → (780000,)
+
+        # ========== Step 2. 归一化CMAP幅值数据 ==========
+        cmap_normalized = self._normalize_cmap_data(data)  # (N,500)
+
+        # ========== Step 3. 加载运动单位数量标签 ==========
+        mu_counts = label_num.astype(np.float32)  # (N,)
+
+        # ========== Step 4. 加载并映射阈值 ==========
+        mu_thresholds_raw = muThr.astype(np.float32)
+        mu_thresholds_aligned = self._map_mu_thresholds(data, mu_thresholds_raw)  # (N,500)
+
+        # ========== Step 5. 输出结果 ==========
         result = {
-            'data': cmap_normalized,        # (N,500) 归一化CMAP幅值
-            'label_num': mu_counts,         # (N,) 运动单位数量
-            'muThr': mu_thresholds_aligned  # (N,500) 对齐到x轴的阈值位置
+            "data": cmap_normalized,         # (N,500)
+            "label_num": mu_counts,          # (N,)
+            "muThr": mu_thresholds_aligned   # (N,500)
         }
-        
-        print(f"数据预处理完成:")
+
+        print("\n✅ 数据预处理完成:")
         print(f"  - 样本数量: {len(cmap_normalized)}")
         print(f"  - CMAP数据形状: {cmap_normalized.shape}")
         print(f"  - MU数量范围: [{mu_counts.min():.1f}, {mu_counts.max():.1f}]")
-        
+        print(f"  - 阈值矩阵形状: {mu_thresholds_aligned.shape}\n")
+
         return result
     
     def _normalize_cmap_data(self, data):
