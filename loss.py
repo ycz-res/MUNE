@@ -56,7 +56,7 @@ def thr(thresholds_pred, thresholds_target,
     
     return total_loss
 
-def ce(thresholds_pred, thresholds_target):
+def ce(thresholds_pred, thresholds_target, pos_weight=None):
     """
     交叉熵式阈值损失函数
     对正样本位置(1)最大化预测分数，对负样本位置(0)最小化预测分数
@@ -64,6 +64,7 @@ def ce(thresholds_pred, thresholds_target):
     Args:
         thresholds_pred:   (B, 500)  模型预测分数 [0.1, 0.7, 0.8, 0.2, 0.5, 0.3]
         thresholds_target: (B, 500)  真实标签 [0, 1, 1, 0, 1, 0]
+        pos_weight:        float     正样本权重，用于处理不平衡数据
     
     Returns:
         total_loss: 标量损失
@@ -72,6 +73,7 @@ def ce(thresholds_pred, thresholds_target):
     bce_loss = F.binary_cross_entropy_with_logits(
         thresholds_pred, 
         thresholds_target.float(),
+        pos_weight=pos_weight,
         reduction='mean'
     )
     

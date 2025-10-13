@@ -62,10 +62,11 @@ class Sim(Dataset):
         mu_counts = np.array(mat_data['label_num']).squeeze().astype(np.float32)
         
         # Step3: 加载原始运动单位阈值
-        mu_thresholds_raw = np.array(mat_data['label_thr']).squeeze()
-        
-        # Step4: 将阈值映射到x轴对应的位置
-        mu_thresholds_aligned = self._map_mu_thresholds(mat_data['data'], mu_thresholds_raw)  # (N,500)
+        mu_thresholds_raw = np.array(mat_data['muThr']).squeeze()
+
+        # Step4: 将阈值映射到 x 轴对应的位置
+        mu_thresholds_aligned = self._map_mu_thresholds(mat_data['data'], mu_thresholds_raw)  # (N, 500)
+
 
         result = {
             'data': cmap_normalized,        # (N,500) 归一化CMAP幅值
@@ -110,33 +111,45 @@ class Sim(Dataset):
 
     def _map_mu_thresholds(self, data, muThr):
         """
-        把 muThr 阈值映射到对应的 x 位置。
-        规则：x >= 当前最小阈值时标记，并丢弃该阈值。
+        将每个样本的 MU 阈值 (muThr) 映射到对应的 x 轴位置 (500维)。
 
-        根据 self.threshold_mode 控制输出：
-            - 'value': 输出真实阈值
-            - 'binary': 输出 0/1 掩码
+        参数:
+            data: (N, 500, 2)
+                每个样本的电刺激序列和幅值。
+                data[n, :, 0] 表示刺激电流序列 x（单位 mA）
+            muThr: (N, 160)
+                每个样本的运动单位阈值分布（mA），0 表示无效填充。
+
+        输出:
+            thr_matrix: (N, 500)
+                每个样本的 500 维阈值映射结果：
+                    - 若 threshold_mode == 'binary' → 0/1 掩码
+                    - 若 threshold_mode == 'value' → 实际阈值
         """
         N, P, _ = data.shape
         thr_matrix = np.zeros((N, P), dtype=np.float32)
 
         for n in range(N):
+            # 电刺激坐标（单调递增）
             x = data[n, :, 0]  # (500,)
             thr_vector = np.zeros(P, dtype=np.float32)
 
+            # 提取该样本有效阈值：去0 → 排序 → 去重
             mu_vals = muThr[n][muThr[n] > 0]
-            mu_vals = list(np.sort(mu_vals))
+            if mu_vals.size == 0:
+                thr_matrix[n] = thr_vector
+                continue
 
-            for i in range(P):
-                if len(mu_vals) == 0:
-                    break
-                if x[i] >= mu_vals[0]:
-                    # ✅ 根据模式决定写入内容
+            mu_vals = np.unique(np.sort(mu_vals))  # 保证递增顺序与生理一致
+
+            # 将每个阈值映射到 x 轴最近位置
+            for val in mu_vals:
+                idx = np.searchsorted(x, val)  # 找到第一个 ≥ val 的位置
+                if idx < P:  # 只在有效范围内标记
                     if self.threshold_mode == "binary":
-                        thr_vector[i] = 1.0  # 标记为 1
+                        thr_vector[idx] = 1.0
                     else:
-                        thr_vector[i] = mu_vals[0]  # 保留真实阈值
-                    mu_vals.pop(0)
+                        thr_vector[idx] = val  # 保留实际阈值（mA）
 
             thr_matrix[n] = thr_vector
 

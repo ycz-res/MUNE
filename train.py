@@ -10,6 +10,7 @@ import argparse
 import os
 from datetime import datetime
 import numpy as np
+import time
 
 from dataset import Sim
 from config import get_config
@@ -37,6 +38,9 @@ def get_args_parser():
     a_parser.add_argument('--save_dir', default='checkpoints', type=str, help='Directory to save models')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim'], help='Dataset type')
+    a_parser.add_argument('--metrics_threshold', default=0.1, type=float, help='Threshold for metrics calculation (0.1-0.3 recommended for sparse data)')
+    a_parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss for imbalanced data')
+    a_parser.add_argument('--pos_weight', default=50.0, type=float, help='Positive class weight for weighted loss')
     
     return a_parser
 
@@ -71,8 +75,18 @@ def main(args):
     # 初始化训练组件
     model = eval(args.model_type)(d_model=64).to(args.device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay)
-    loss_fn = eval(args.loss_type)
-    metrics_fn = b_v_metrics
+    
+    # 创建损失函数（支持加权）
+    if args.use_weighted_loss and args.loss_type == 'ce':
+        pos_weight_tensor = torch.tensor(args.pos_weight, device=args.device)
+        def loss_fn(pred, target):
+            return ce(pred, target, pos_weight=pos_weight_tensor)
+    else:
+        loss_fn = eval(args.loss_type)
+    
+    # 创建指标函数（使用自定义阈值）
+    def metrics_fn(pred, target):
+        return b_v_metrics(pred, target, threshold=args.metrics_threshold)
     
     # 训练状态
     best_score = -float('inf')
@@ -84,16 +98,22 @@ def main(args):
     
     # 训练循环
     for epoch in range(args.epochs):
+        epoch_start_time = time.time()
+        print(f"\n🔄 Epoch {epoch+1}/{args.epochs} 开始训练...")
+        
         # 训练和验证
-        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device)
+        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.epochs)
         val_loss, val_metrics = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
         
+        epoch_time = time.time() - epoch_start_time
+        
         # 打印基础指标
-        print(f"Epoch {epoch+1}: train_loss={train_loss:.4f}, val_loss={val_loss:.4f}")
+        print(f"⏱️  Epoch {epoch+1} 完成，耗时: {epoch_time:.2f}秒")
+        print(f"📊 训练损失: {train_loss:.4f} | 验证损失: {val_loss:.4f}")
         if val_metrics:
-            print(f"val_metrics: {val_metrics}")
+            print(f"📈 验证指标: {val_metrics}")
         else:
-            print("val_metrics: None")
+            print("📈 验证指标: None")
         
         # 记录训练历史
         training_history.append({
@@ -112,10 +132,10 @@ def main(args):
             best_epoch = epoch + 1
             patience_counter = 0
             save_model(model, optimizer, epoch + 1, best_score, val_metrics, args.save_dir, timestamp)
-            print(f"📈 Epoch {epoch+1}: Loss={train_loss:.4f}/{val_loss:.4f} | Score={best_score:.4f} ⭐")
+            print(f"🎯 新最佳模型! Score={best_score:.4f} ⭐ (耐心值重置)")
         else:
             patience_counter += 1
-            print(f"📊 Epoch {epoch+1}: Loss={train_loss:.4f}/{val_loss:.4f} | Score={current_score:.4f}")
+            print(f"⏳ 耐心值: {patience_counter}/{args.patience} (Score={current_score:.4f})")
         
         # 早停检查
         if patience_counter >= args.patience:
@@ -163,12 +183,20 @@ def main(args):
     )
 
 
-def train_epoch(model, train_loader, optimizer, loss_fn, device):
+def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, total_epochs):
     model.train()
     total_loss = 0.0
     batch_count = 0
+    total_batches = len(train_loader)
     
-    for _, batch in enumerate(train_loader):
+    # 每10个batch或每25%进度打印一次
+    print_interval = max(1, total_batches // 10)  # 至少每10%打印一次
+    if total_batches < 10:
+        print_interval = max(1, total_batches // 4)  # 小数据集时更频繁
+    
+    batch_start_time = time.time()
+    
+    for batch_idx, batch in enumerate(train_loader):
         src, tgt = batch
         # 移动到设备
         src = {key: value.to(device) for key, value in src.items()}
@@ -188,6 +216,19 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device):
         total_loss += loss.item()
         batch_count += 1
         
+        # 定期打印进度
+        if (batch_idx + 1) % print_interval == 0 or (batch_idx + 1) == total_batches:
+            progress = (batch_idx + 1) / total_batches * 100
+            batch_time = time.time() - batch_start_time
+            avg_batch_time = batch_time / print_interval
+            current_avg_loss = total_loss / batch_count
+            
+            print(f"  📦 Batch {batch_idx+1}/{total_batches} ({progress:.1f}%) | "
+                  f"Loss: {current_avg_loss:.4f} | "
+                  f"速度: {avg_batch_time:.2f}s/batch")
+            
+            batch_start_time = time.time()
+        
     avg_loss = total_loss / batch_count
     return avg_loss
 
@@ -196,13 +237,16 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
     model.eval()
     val_loss = 0.0
     val_batch_count = 0
+    total_val_batches = len(val_loader)
     
     # 收集所有预测和真实值用于计算指标
     all_predictions = []
     all_targets = []
     
+    print(f"  🔍 开始验证 ({total_val_batches} batches)...")
+    
     with torch.no_grad():
-        for _, batch in enumerate(val_loader):
+        for batch_idx, batch in enumerate(val_loader):
             src, tgt = batch
             # 移动到设备
             src = {key: value.to(device) for key, value in src.items()}
@@ -217,6 +261,11 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
             # 收集预测和真实值
             all_predictions.append(thresholds_pred)
             all_targets.append(tgt["thresholds"])
+            
+            # 验证进度提示（只在验证集较大时显示）
+            if total_val_batches > 5 and (batch_idx + 1) % max(1, total_val_batches // 5) == 0:
+                progress = (batch_idx + 1) / total_val_batches * 100
+                print(f"    🔍 验证进度: {batch_idx+1}/{total_val_batches} ({progress:.0f}%)")
     
     # 计算验证指标
     if all_predictions:
@@ -227,6 +276,7 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         val_metrics = metrics_fn(all_pred, all_true)
         
         avg_val_loss = val_loss / val_batch_count
+        print(f"  ✅ 验证完成: {val_batch_count} batches")
         return avg_val_loss, val_metrics
     else:
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")

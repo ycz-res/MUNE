@@ -88,6 +88,10 @@ class LSTM(nn.Module):
         )
 
         self.fc = nn.Linear(d_model * self.num_directions, 1)  # 每个时间步输出1个logit
+        
+        # 改进初始化：给最后一层更大的权重和bias
+        nn.init.xavier_uniform_(self.fc.weight, gain=2.0)
+        nn.init.constant_(self.fc.bias, 0.1)  # 给一个小的正bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.unsqueeze(-1)  # [B, 500] → [B, 500, 1]
