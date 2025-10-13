@@ -56,17 +56,27 @@ class Sim(Dataset):
     def __load_sim_data(self):
         """严格加载预处理后的数据（.npz），若不存在则报错提示先运行预处理。"""
 
+        # 支持两种默认命名：data.npz（推荐）与历史 *_preprocessed_<mode>.npz
         base, _ = os.path.splitext(self.data_path)
-        preprocessed_npz = f"{base}_preprocessed_{self.threshold_mode}.npz"
+        candidates = [
+            os.path.join(os.path.dirname(self.data_path), "data.npz"),
+            f"{base}_preprocessed_{self.threshold_mode}.npz",
+        ]
 
-        if os.path.isfile(preprocessed_npz):
-            print(f"📦 检测到预处理文件: {preprocessed_npz}，直接加载以加速训练...")
-            npz = np.load(preprocessed_npz, allow_pickle=True)
+        selected = None
+        for p in candidates:
+            if os.path.isfile(p):
+                selected = p
+                break
+
+        if selected is not None:
+            print(f"📦 检测到预处理文件: {selected}，直接加载以加速训练...")
+            npz = np.load(selected, allow_pickle=True)
             cmap = np.array(npz["cmap"]).astype(np.float32)
-            label_num = np.array(npz["label_num"]).astype(np.float32)
-            muThr = np.array(npz["muThr"]).astype(np.float32)
-            result = {"data": cmap, "label_num": label_num, "muThr": muThr}
-            print(f"✅ 预处理数据加载完成: data={cmap.shape}, muThr={muThr.shape}")
+            mus = np.array(npz["mus"]).astype(np.float32)
+            thresholds = np.array(npz["thresholds"]).astype(np.float32)
+            result = {"data": cmap, "label_num": mus, "muThr": thresholds}
+            print(f"✅ 预处理数据加载完成: data={cmap.shape}, thresholds={thresholds.shape}")
             return result
 
         raise FileNotFoundError(
