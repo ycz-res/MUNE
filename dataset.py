@@ -5,6 +5,7 @@ from torch.utils.data import Dataset
 from typing import List, Tuple, Dict, Any
 from utils import load_mat_data
 import h5py
+import os
 
 
 
@@ -53,129 +54,26 @@ class Sim(Dataset):
             raise ValueError(f"不支持的数据类型: {data_type}")
 
     def __load_sim_data(self):
-        """加载仿真数据并进行预处理（自动修复MATLAB转置维度）"""
-        import numpy as np
+        """严格加载预处理后的数据（.npz），若不存在则报错提示先运行预处理。"""
 
-        mat_data = load_mat_data(self.data_path, lazy=False)
-        print(f"📂 加载数据文件: {self.data_path}")
-        print(f"🔑 包含变量: {list(mat_data.keys())}")
+        base, _ = os.path.splitext(self.data_path)
+        preprocessed_npz = f"{base}_preprocessed_{self.threshold_mode}.npz"
 
-        # ========== Step 1. 修正维度顺序 ==========
-        data = np.array(mat_data["data"])
-        label_num = np.array(mat_data["label_num"]).squeeze()
-        muThr = np.array(mat_data["muThr"])
+        if os.path.isfile(preprocessed_npz):
+            print(f"📦 检测到预处理文件: {preprocessed_npz}，直接加载以加速训练...")
+            npz = np.load(preprocessed_npz, allow_pickle=True)
+            cmap = np.array(npz["cmap"]).astype(np.float32)
+            label_num = np.array(npz["label_num"]).astype(np.float32)
+            muThr = np.array(npz["muThr"]).astype(np.float32)
+            result = {"data": cmap, "label_num": label_num, "muThr": muThr}
+            print(f"✅ 预处理数据加载完成: data={cmap.shape}, muThr={muThr.shape}")
+            return result
 
-        # ⚠️ 如果维度是 (2,500,780000) 则说明被转置了
-        if data.shape[0] < data.shape[-1]:
-            print(f"⚙️ 检测到维度反转: data.shape={data.shape} → 自动转置中...")
-            data = np.transpose(data, (2, 1, 0))  # (2,500,780000) → (780000,500,2)
-
-        if muThr.shape[0] < muThr.shape[-1]:
-            print(f"⚙️ muThr 转置: {muThr.shape} → {muThr.T.shape}")
-            muThr = muThr.T  # (160,780000) → (780000,160)
-
-        if label_num.ndim == 2 and label_num.shape[0] < label_num.shape[1]:
-            print(f"⚙️ label_num 转置: {label_num.shape} → {label_num.T.shape}")
-            label_num = label_num.T.squeeze()  # (1,780000) → (780000,)
-
-        # ========== Step 2. 归一化CMAP幅值数据 ==========
-        cmap_normalized = self._normalize_cmap_data(data)  # (N,500)
-
-        # ========== Step 3. 加载运动单位数量标签 ==========
-        mu_counts = label_num.astype(np.float32)  # (N,)
-
-        # ========== Step 4. 加载并映射阈值 ==========
-        mu_thresholds_raw = muThr.astype(np.float32)
-        mu_thresholds_aligned = self._map_mu_thresholds(data, mu_thresholds_raw)  # (N,500)
-
-        # ========== Step 5. 输出结果 ==========
-        result = {
-            "data": cmap_normalized,         # (N,500)
-            "label_num": mu_counts,          # (N,)
-            "muThr": mu_thresholds_aligned   # (N,500)
-        }
-
-        print("\n✅ 数据预处理完成:")
-        print(f"  - 样本数量: {len(cmap_normalized)}")
-        print(f"  - CMAP数据形状: {cmap_normalized.shape}")
-        print(f"  - MU数量范围: [{mu_counts.min():.1f}, {mu_counts.max():.1f}]")
-        print(f"  - 阈值矩阵形状: {mu_thresholds_aligned.shape}\n")
-
-        return result
+        raise FileNotFoundError(
+            f"未找到预处理文件: {preprocessed_npz}。请先运行预处理脚本生成 .npz 文件。"
+        )
     
-    def _normalize_cmap_data(self, data):
-        """
-        对CMAP数据进行归一化处理
-        
-        Args:
-            data: 原始CMAP数据，形状为(N, 500, 2)，其中最后一维为[x坐标, y幅值]
-            
-        Returns:
-            Y_norm: 归一化后的y值数据，形状为(N, 500)
-            
-        处理步骤:
-            1. 按x坐标排序 
-            2. 对y幅值进行[0,1]归一化
-        """
-        N, P, _ = data.shape
-        Y_norm = np.zeros((N, P), dtype=np.float32)
-
-        for i in range(N):
-            x, y = data[i, :, 0], data[i, :, 1]
-            # 按x坐标排序
-            idx = np.argsort(x)
-            y = y[idx]
-            # y归一化到[0,1]
-            y = (y - y.min()) / (y.max() - y.min() + 1e-8)
-            Y_norm[i] = y
-
-        return Y_norm
-
-    def _map_mu_thresholds(self, data, muThr):
-        """
-        将每个样本的 MU 阈值 (muThr) 映射到对应的 x 轴位置 (500维)。
-
-        参数:
-            data: (N, 500, 2)
-                每个样本的电刺激序列和幅值。
-                data[n, :, 0] 表示刺激电流序列 x（单位 mA）
-            muThr: (N, 160)
-                每个样本的运动单位阈值分布（mA），0 表示无效填充。
-
-        输出:
-            thr_matrix: (N, 500)
-                每个样本的 500 维阈值映射结果：
-                    - 若 threshold_mode == 'binary' → 0/1 掩码
-                    - 若 threshold_mode == 'value' → 实际阈值
-        """
-        N, P, _ = data.shape
-        thr_matrix = np.zeros((N, P), dtype=np.float32)
-
-        for n in range(N):
-            # 电刺激坐标（单调递增）
-            x = data[n, :, 0]  # (500,)
-            thr_vector = np.zeros(P, dtype=np.float32)
-
-            # 提取该样本有效阈值：去0 → 排序 → 去重
-            mu_vals = muThr[n][muThr[n] > 0]
-            if mu_vals.size == 0:
-                thr_matrix[n] = thr_vector
-                continue
-
-            mu_vals = np.unique(np.sort(mu_vals))  # 保证递增顺序与生理一致
-
-            # 将每个阈值映射到 x 轴最近位置
-            for val in mu_vals:
-                idx = np.searchsorted(x, val)  # 找到第一个 ≥ val 的位置
-                if idx < P:  # 只在有效范围内标记
-                    if self.threshold_mode == "binary":
-                        thr_vector[idx] = 1.0
-                    else:
-                        thr_vector[idx] = val  # 保留实际阈值（mA）
-
-            thr_matrix[n] = thr_vector
-
-        return thr_matrix
+    
 
     def __load_real_data(self):
         return {}
