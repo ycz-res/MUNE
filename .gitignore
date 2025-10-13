@@ -1,5 +1,8 @@
-# Data directory
-data/
+# Data files (keep directory structure and Python files)
+data/**/*.mat
+data/**/*.npz
+data/**/*.h5
+data/**/*.hdf5
 
 # Python cache files
 __pycache__/
