@@ -2,7 +2,7 @@ import os
 import argparse
 import numpy as np
 from typing import Dict
-from ...utils import load_mat_data
+from utils import load_mat_data
 
 
 def normalize_cmap_data(data: np.ndarray) -> np.ndarray:
