@@ -33,7 +33,7 @@ def b_v_metrics(pred_logits: torch.Tensor,
     if mode == "binary":
         # 概率模式：Sigmoid + 阈值化
         prob = torch.sigmoid(pred_logits)
-        pred = (prob > threshold).float()
+        pred = (prob >= threshold).float()
     elif mode == "value":
         # 回归模式：ReLU 保证非负输出
         pred = F.relu(pred_logits)
@@ -99,16 +99,8 @@ def b_v_metrics(pred_logits: torch.Tensor,
     # 3️⃣ 综合指标（可用于 early stopping 选择最佳 epoch）
     # ============================================================
     if mode == "binary":
-        # 对于稀疏数据，使用更平衡的评分策略
-        # 考虑Precision和Recall的平衡，以及IoU的重要性
-        if metrics["F1"] > 0:
-            metrics["Score"] = 0.4 * metrics["F1"] + 0.3 * metrics["IoU"] + 0.2 * metrics["Precision"] + 0.1 * metrics["Recall"]
-        else:
-            # 如果F1为0，使用Precision和Recall的调和平均
-            if metrics["Precision"] > 0 or metrics["Recall"] > 0:
-                metrics["Score"] = 0.3 * metrics["Precision"] + 0.3 * metrics["Recall"] + 0.4 * metrics["IoU"]
-            else:
-                metrics["Score"] = 0.0
+        # 简化评分策略：主要关注F1和IoU
+        metrics["Score"] = 0.6 * metrics["F1"] + 0.4 * metrics["IoU"]
     else:
         # 位置与数值共同评分（MAE 越小越好，取反）
         metrics["Score"] = 0.4 * metrics["F1"] + 0.4 * metrics["IoU"] + 0.2 * (1 - metrics["MAE"])
