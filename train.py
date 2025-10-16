@@ -11,6 +11,8 @@ import os
 from datetime import datetime
 import numpy as np
 import time
+import json
+import pandas as pd
 
 from dataset import Sim
 from config import get_config
@@ -94,6 +96,25 @@ def main(args):
     patience_counter = 0
     training_history = []  # 存储训练历史
     
+    # 创建日志保存目录
+    log_dir = os.path.join(curves_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 初始化日志数据存储
+    prediction_logs = {
+        'train': [],
+        'val': [],
+        'metadata': {
+            'timestamp': timestamp,
+            'model_type': args.model_type,
+            'loss_type': args.loss_type,
+            'threshold_mode': args.threshold_mode,
+            'metrics_threshold': args.metrics_threshold,
+            'batch_size': args.batch_size,
+            'lr': args.lr
+        }
+    }
+    
     print(f"🚀 开始训练: {args.model_type} + {args.loss_type} | 数据集: {len(train_dataset)}/{len(val_dataset)}/{len(test_dataset)} | Epochs: {args.epochs}")
     
     # 训练循环
@@ -102,8 +123,8 @@ def main(args):
         print(f"\n🔄 Epoch {epoch+1}/{args.epochs} 开始训练...")
         
         # 训练和验证
-        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.epochs)
-        val_loss, val_metrics, val_pred, val_target = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
+        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.epochs, prediction_logs)
+        val_loss, val_metrics, val_pred, val_target = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device, prediction_logs)
         
         epoch_time = time.time() - epoch_start_time
         
@@ -146,10 +167,13 @@ def main(args):
     
     print(f"🏆 最佳模型在第 {best_epoch} 个epoch，综合分数: {best_score:.4f}")
     
+    # 保存预测日志
+    save_prediction_logs(prediction_logs, log_dir, timestamp)
+    
     # 测试阶段
     load_best_model(model, args.save_dir, timestamp)
     print("🧪 测试阶段")
-    test_loss, test_metrics, _, _ = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device)
+    test_loss, test_metrics, _, _ = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device, None)
     
     # 打印测试指标
     print(f"✅ 测试完成, 平均损失: {test_loss:.6f}")
@@ -185,7 +209,7 @@ def main(args):
     )
 
 
-def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, total_epochs):
+def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, total_epochs, prediction_logs=None):
     model.train()
     total_loss = 0.0
     batch_count = 0
@@ -218,7 +242,7 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
         total_loss += loss.item()
         batch_count += 1
         
-        # 定期打印进度
+        # 定期打印进度和预测对比
         if (batch_idx + 1) % print_interval == 0 or (batch_idx + 1) == total_batches:
             progress = (batch_idx + 1) / total_batches * 100
             batch_time = time.time() - batch_start_time
@@ -229,13 +253,19 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
                   f"Loss: {current_avg_loss:.4f} | "
                   f"速度: {avg_batch_time:.2f}s/batch")
             
+            # 输出当前batch的预测对比
+            batch_log = print_batch_predictions(thresholds_pred, tgt["thresholds"], batch_idx+1, current_epoch, "训练", 0.1)
+            # 收集日志数据
+            if prediction_logs is not None:
+                prediction_logs['train'].append(batch_log)
+            
             batch_start_time = time.time()
         
     avg_loss = total_loss / batch_count
     return avg_loss
 
 
-def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
+def validate_epoch(model, val_loader, loss_fn, metrics_fn, device, prediction_logs=None):
     model.eval()
     val_loss = 0.0
     val_batch_count = 0
@@ -264,10 +294,16 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
             all_predictions.append(thresholds_pred)
             all_targets.append(tgt["thresholds"])
             
-            # 验证进度提示（只在验证集较大时显示）
+            # 验证进度提示和预测对比（只在验证集较大时显示）
             if total_val_batches > 5 and (batch_idx + 1) % max(1, total_val_batches // 5) == 0:
                 progress = (batch_idx + 1) / total_val_batches * 100
                 print(f"    🔍 验证进度: {batch_idx+1}/{total_val_batches} ({progress:.0f}%)")
+                
+                # 输出当前batch的预测对比
+                batch_log = print_batch_predictions(thresholds_pred, tgt["thresholds"], batch_idx+1, 0, "验证", 0.1)
+                # 收集日志数据
+                if prediction_logs is not None:
+                    prediction_logs['val'].append(batch_log)
     
     # 计算验证指标
     if all_predictions:
@@ -282,6 +318,174 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         return avg_val_loss, val_metrics, all_pred, all_true
     else:
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")
+
+
+def print_batch_predictions(pred: torch.Tensor, target: torch.Tensor, batch_idx: int, epoch: int, stage: str, threshold: float = 0.1):
+    """
+    输出batch级别的预测对比信息并返回日志数据
+    
+    Args:
+        pred: 预测结果 (batch_size, 500)
+        target: 真实标签 (batch_size, 500)
+        batch_idx: batch索引
+        epoch: epoch索引
+        stage: 阶段（训练/验证）
+        threshold: 二值化阈值
+    
+    Returns:
+        dict: 包含预测对比数据的字典
+    """
+    # 将预测转换为概率并二值化
+    prob = torch.sigmoid(pred)
+    pred_binary = (prob >= threshold).float()
+    
+    batch_size = pred.shape[0]
+    
+    print(f"    📊 {stage} Batch {batch_idx} 预测对比:")
+    
+    # 存储样本级数据
+    sample_data = []
+    
+    # 输出前3个样本的详细对比
+    for i in range(min(3, batch_size)):
+        true_count = int(target[i].sum().item())
+        pred_count = int(pred_binary[i].sum().item())
+        
+        # 找到真实和预测的阈值位置
+        true_positions = torch.where(target[i] > 0)[0].cpu().numpy()
+        pred_positions = torch.where(pred_binary[i] > 0)[0].cpu().numpy()
+        
+        print(f"      样本 {i+1}: 真实MU数量={true_count}, 预测MU数量={pred_count}")
+        
+        if len(true_positions) > 0:
+            print(f"        真实阈值位置: {true_positions[:10]}{'...' if len(true_positions) > 10 else ''}")
+        else:
+            print(f"        真实阈值位置: 无")
+            
+        if len(pred_positions) > 0:
+            print(f"        预测阈值位置: {pred_positions[:10]}{'...' if len(pred_positions) > 10 else ''}")
+        else:
+            print(f"        预测阈值位置: 无")
+        
+        # 计算重叠
+        if len(true_positions) > 0:
+            overlap = len(set(true_positions) & set(pred_positions))
+            overlap_ratio = overlap / len(true_positions)
+            print(f"        重叠位置数: {overlap}/{len(true_positions)} (重叠率: {overlap_ratio:.3f})")
+        else:
+            overlap = 0
+            overlap_ratio = 1.0
+            print(f"        重叠位置数: 0/0 (重叠率: 1.000)")
+        
+        # 存储样本数据
+        sample_data.append({
+            'sample_idx': i,
+            'true_mu_count': true_count,
+            'pred_mu_count': pred_count,
+            'true_positions': true_positions.tolist(),
+            'pred_positions': pred_positions.tolist(),
+            'overlap_count': overlap,
+            'overlap_ratio': overlap_ratio,
+            'true_prob_values': prob[i][true_positions].cpu().numpy().tolist() if len(true_positions) > 0 else [],
+            'pred_prob_values': prob[i][pred_positions].cpu().numpy().tolist() if len(pred_positions) > 0 else []
+        })
+    
+    if batch_size > 3:
+        print(f"      ... 还有 {batch_size - 3} 个样本")
+    
+    # 计算整体统计
+    true_counts = target.sum(dim=1).cpu().numpy()
+    pred_counts = pred_binary.sum(dim=1).cpu().numpy()
+    
+    avg_true = np.mean(true_counts)
+    avg_pred = np.mean(pred_counts)
+    mae = np.mean(np.abs(pred_counts - true_counts))
+    
+    print(f"    📈 Batch统计: 平均真实MU={avg_true:.2f}, 平均预测MU={avg_pred:.2f}, MAE={mae:.2f}")
+    
+    # 返回日志数据
+    batch_log = {
+        'epoch': epoch,
+        'batch_idx': batch_idx,
+        'stage': stage,
+        'threshold': threshold,
+        'batch_size': batch_size,
+        'batch_stats': {
+            'avg_true_mu': float(avg_true),
+            'avg_pred_mu': float(avg_pred),
+            'mae': float(mae),
+            'true_counts': true_counts.tolist(),
+            'pred_counts': pred_counts.tolist()
+        },
+        'sample_details': sample_data,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    return batch_log
+
+
+def save_prediction_logs(prediction_logs, log_dir, timestamp):
+    """
+    保存预测日志数据为多种格式
+    
+    Args:
+        prediction_logs: 预测日志数据
+        log_dir: 日志保存目录
+        timestamp: 时间戳
+    """
+    # 1. 保存为JSON格式（完整数据）
+    json_path = os.path.join(log_dir, f'prediction_logs_{timestamp}.json')
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(prediction_logs, f, ensure_ascii=False, indent=2)
+    
+    # 2. 保存为CSV格式（便于可视化）
+    csv_data = []
+    for stage in ['train', 'val']:
+        for log_entry in prediction_logs[stage]:
+            for sample in log_entry['sample_details']:
+                csv_data.append({
+                    'epoch': log_entry['epoch'],
+                    'batch_idx': log_entry['batch_idx'],
+                    'stage': log_entry['stage'],
+                    'sample_idx': sample['sample_idx'],
+                    'true_mu_count': sample['true_mu_count'],
+                    'pred_mu_count': sample['pred_mu_count'],
+                    'overlap_count': sample['overlap_count'],
+                    'overlap_ratio': sample['overlap_ratio'],
+                    'true_positions_count': len(sample['true_positions']),
+                    'pred_positions_count': len(sample['pred_positions']),
+                    'timestamp': log_entry['timestamp']
+                })
+    
+    if csv_data:
+        df = pd.DataFrame(csv_data)
+        csv_path = os.path.join(log_dir, f'prediction_summary_{timestamp}.csv')
+        df.to_csv(csv_path, index=False)
+        
+        # 3. 保存batch级统计CSV
+        batch_stats_data = []
+        for stage in ['train', 'val']:
+            for log_entry in prediction_logs[stage]:
+                batch_stats_data.append({
+                    'epoch': log_entry['epoch'],
+                    'batch_idx': log_entry['batch_idx'],
+                    'stage': log_entry['stage'],
+                    'avg_true_mu': log_entry['batch_stats']['avg_true_mu'],
+                    'avg_pred_mu': log_entry['batch_stats']['avg_pred_mu'],
+                    'mae': log_entry['batch_stats']['mae'],
+                    'batch_size': log_entry['batch_size'],
+                    'timestamp': log_entry['timestamp']
+                })
+        
+        df_batch = pd.DataFrame(batch_stats_data)
+        batch_csv_path = os.path.join(log_dir, f'batch_stats_{timestamp}.csv')
+        df_batch.to_csv(batch_csv_path, index=False)
+    
+    print(f"📝 预测日志已保存:")
+    print(f"   JSON格式: {json_path}")
+    if csv_data:
+        print(f"   样本级CSV: {csv_path}")
+        print(f"   Batch级CSV: {batch_csv_path}")
 
 
 def generate_training_report(training_history, test_loss, test_metrics, best_epoch, best_score, 
