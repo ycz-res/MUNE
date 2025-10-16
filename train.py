@@ -103,7 +103,7 @@ def main(args):
         
         # 训练和验证
         train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.epochs)
-        val_loss, val_metrics = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
+        val_loss, val_metrics, val_pred, val_target = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
         
         epoch_time = time.time() - epoch_start_time
         
@@ -120,7 +120,9 @@ def main(args):
             'epoch': epoch + 1,
             'train_loss': train_loss,
             'val_loss': val_loss,
-            'val_metrics': val_metrics
+            'val_metrics': val_metrics,
+            'val_pred': val_pred,
+            'val_target': val_target
         })
         
         # 早停和模型保存
@@ -147,7 +149,7 @@ def main(args):
     # 测试阶段
     load_best_model(model, args.save_dir, timestamp)
     print("🧪 测试阶段")
-    test_loss, test_metrics = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device)
+    test_loss, test_metrics, _, _ = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device)
     
     # 打印测试指标
     print(f"✅ 测试完成, 平均损失: {test_loss:.6f}")
@@ -277,7 +279,7 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         
         avg_val_loss = val_loss / val_batch_count
         print(f"  ✅ 验证完成: {val_batch_count} batches")
-        return avg_val_loss, val_metrics
+        return avg_val_loss, val_metrics, all_pred, all_true
     else:
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")
 
@@ -292,7 +294,11 @@ def generate_training_report(training_history, test_loss, test_metrics, best_epo
         visualizer.update_epoch(
             epoch_data['epoch'], 
             epoch_data['train_loss'], 
-            epoch_data['val_loss']
+            epoch_data['val_loss'],
+            test_loss=test_loss,
+            val_metrics=epoch_data.get('val_metrics'),
+            val_pred=epoch_data.get('val_pred'),
+            val_target=epoch_data.get('val_target')
         )
     
     # 生成综合报告
