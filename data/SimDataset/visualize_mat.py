@@ -84,6 +84,10 @@ def visualize_mat_samples(mat_path: str, indices: list, save_dir: str = None):
         for threshold in valid_thresholds:
             # 直接用阈值的真实值标记
             ax.axvline(x=threshold, color='green', linestyle='--', alpha=0.7, linewidth=1)
+            # 在竖线上标记阈值真实值
+            ax.text(threshold, ax.get_ylim()[1] * 0.95, f'{threshold:.1f}', 
+                   rotation=90, verticalalignment='top', horizontalalignment='right',
+                   fontsize=8, color='green', alpha=0.8)
         
         # 设置图形属性
         ax.set_xlabel('Current (mA)', fontsize=12)
