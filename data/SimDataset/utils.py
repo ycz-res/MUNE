@@ -56,5 +56,19 @@ def load_mat_data(file_path: str, lazy: bool = True):
     if not data_dict:
         raise ValueError(f"❌ 未能在 {file_path} 中加载有效变量")
 
+    # 处理数据翻转：将data的最后一维从[x,y]翻转为[y,x]
+    if 'data' in data_dict:
+        if lazy:
+            # 懒加载模式下，需要先转换为numpy数组才能翻转
+            data_dict['data'] = np.array(data_dict['data'])
+        data_dict['data'] = np.flip(data_dict['data'], axis=1)
     print(f"✅ 成功加载 {len(data_dict)} 个变量（{'lazy' if lazy else 'eager'} 模式）")
     return data_dict
+
+
+
+
+
+
+if __name__ == '__main__':
+    data_dict = load_mat_data('data.mat')

@@ -38,7 +38,7 @@ def get_args_parser():
     a_parser.add_argument('--save_dir', default='checkpoints', type=str, help='Directory to save models')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim'], help='Dataset type')
-    a_parser.add_argument('--metrics_threshold', default=0.1, type=float, help='Threshold for metrics calculation (0.1-0.3 recommended for sparse data)')
+    a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.1-0.3 recommended for sparse data)')
     a_parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss for imbalanced data')
     a_parser.add_argument('--pos_weight', default=50.0, type=float, help='Positive class weight for weighted loss')
     

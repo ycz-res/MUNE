@@ -10,21 +10,19 @@ def normalize_cmap_data(data: np.ndarray) -> np.ndarray:
     对 CMAP 原始数据进行归一化。
 
     输入 data 形状为 (N, 500, 2)，最后一维分别是 [x, y]。
+    注意：输入的data已经是按x值排好序的。
     返回形状为 (N, 500) 的 y 归一化结果。
     """
     N, P, _ = data.shape
     y_normalized = np.zeros((N, P), dtype=np.float32)
 
     for sample_index in range(N):
-        x = data[sample_index, :, 0]
-        y = data[sample_index, :, 1]
+        y = data[sample_index, :, 1]  # 直接取y值，因为x已经排好序
 
-        sort_index = np.argsort(x)
-        y_sorted = y[sort_index]
-        y_min = y_sorted.min()
-        y_max = y_sorted.max()
+        y_min = y.min()
+        y_max = y.max()
         y_range = y_max - y_min + 1e-8
-        y_normalized[sample_index] = (y_sorted - y_min) / y_range
+        y_normalized[sample_index] = (y - y_min) / y_range
 
     return y_normalized
 
@@ -36,28 +34,43 @@ def map_mu_thresholds(data: np.ndarray, mu_thresholds: np.ndarray, mode: str) ->
     - mu_thresholds: (N, 160) 0 表示无效填充
     - mode: "binary" | "value"
     返回: (N, 500)
+    
+    逻辑：
+    1. 对mu_thresholds进行从小到大排序
+    2. 对于每个阈值，在500维向量中找到对应的位置
+    3. binary模式：在对应位置计数+1
+    4. value模式：暂未实现
     """
     N, P, _ = data.shape
     threshold_matrix = np.zeros((N, P), dtype=np.float32)
 
     for n in range(N):
-        x = data[n, :, 0]
+        x = data[n, :, 0]  # 电流值序列，如 [0, 1, 2, 3, 4, 5, 6, ...]
         row = np.zeros(P, dtype=np.float32)
 
+        # 提取有效的阈值（非零值）
         mu_vals = mu_thresholds[n][mu_thresholds[n] > 0]
         if mu_vals.size == 0:
             threshold_matrix[n] = row
             continue
 
-        mu_vals = np.unique(np.sort(mu_vals))
+        # 对阈值进行从小到大排序
+        mu_vals = np.sort(mu_vals)
 
-        for val in mu_vals:
-            idx = np.searchsorted(x, val)
-            if idx < P:
-                if mode == "binary":
-                    row[idx] = 1.0
-                else:
-                    row[idx] = float(val)
+        if mode == "binary":
+            # binary模式：在对应位置计数+1
+            for val in mu_vals:
+                # 使用就近原则找到最接近的位置
+                # 计算与每个位置的差值，找到最小差值的位置
+                distances = np.abs(x - val)
+                idx = np.argmin(distances)
+                if idx < P:
+                    row[idx] += 1.0
+        elif mode == "value":
+            # value模式：暂未实现
+            pass
+        else:
+            raise ValueError(f"Unsupported mode: {mode}")
 
         threshold_matrix[n] = row
 
@@ -71,6 +84,11 @@ def fix_transpose_and_extract(mat: Dict[str, np.ndarray]) -> Dict[str, np.ndarra
     - label_num: (N,)
     - muThr: (N, 160) 或相似，数值为阈值（mA），0 为填充
     """
+    print("🔍 处理前的维度信息:")
+    print(f"   - mat['data'] shape: {mat['data'].shape}")
+    print(f"   - mat['label_num'] shape: {mat['label_num'].shape}")
+    print(f"   - mat['muThr'] shape: {mat['muThr'].shape}")
+    
     data = np.array(mat["data"])  # 可能是 (2,500,N) 或 (N,500,2)
     label_num = np.array(mat["label_num"]).squeeze()
     mu_thr = np.array(mat["muThr"])  # 可能是 (M,N) 或 (N,M)
@@ -83,6 +101,12 @@ def fix_transpose_and_extract(mat: Dict[str, np.ndarray]) -> Dict[str, np.ndarra
 
     if label_num.ndim == 2 and label_num.shape[0] < label_num.shape[1]:
         label_num = label_num.T.squeeze()
+
+    print("✅ 处理后的最终维度:")
+    print(f"   - data shape: {data.shape}")
+    print(f"   - label_num shape: {label_num.shape}")
+    print(f"   - muThr shape: {mu_thr.shape}")
+    print()
 
     return {"data": data, "label_num": label_num.astype(np.float32), "muThr": mu_thr.astype(np.float32)}
 
@@ -105,9 +129,11 @@ def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary") 
     y_norm = normalize_cmap_data(data)
     thr_aligned = map_mu_thresholds(data, mu_thr, threshold_mode)
 
-    # 计算默认输出路径并保存
-    output_path = build_default_output_path(mat_path, threshold_mode)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    # 保存数据
+    # 确保输出目录存在
+    output_dir = os.path.dirname(output_path)
+    if output_dir:  # 如果路径包含目录
+        os.makedirs(output_dir, exist_ok=True)
     np.savez_compressed(
         output_path,
         cmap=y_norm.astype(np.float32),
@@ -118,20 +144,14 @@ def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary") 
     return output_path
 
 
-def build_default_output_path(mat_path: str, threshold_mode: str) -> str:
-    # 默认固定输出为当前工作目录下的 data.npz
-    return os.path.join(".", "data.npz")
-
-
 def main():
     parser = argparse.ArgumentParser(description="预处理仿真数据，生成可快速加载的 .npz 文件")
     parser.add_argument("--mat", default="./data.mat", help="源 .mat 路径（默认: ./data.mat）")
     parser.add_argument("--mode", default="binary", choices=["binary", "value"], help="阈值映射模式")
-    parser.add_argument("--out", default=None, help="输出 .npz 路径（可选）")
+    parser.add_argument("--out", default="./data.npz", help="输出文件路径 (默认: ./data.npz)")
     args = parser.parse_args()
 
-    output_path = args.out or build_default_output_path(args.mat, args.mode)
-    saved = preprocess(args.mat, output_path, args.mode)
+    saved = preprocess(args.mat, args.out, args.mode)
     print(f"✅ 预处理完成，已保存: {saved}")
 
 
