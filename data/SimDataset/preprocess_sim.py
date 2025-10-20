@@ -58,14 +58,14 @@ def map_mu_thresholds(data: np.ndarray, mu_thresholds: np.ndarray, mode: str) ->
         mu_vals = np.sort(mu_vals)
 
         if mode == "binary":
-            # binary模式：在对应位置计数+1
+            # binary模式：在对应位置计数为1
             for val in mu_vals:
                 # 使用就近原则找到最接近的位置
                 # 计算与每个位置的差值，找到最小差值的位置
                 distances = np.abs(x - val)
                 idx = np.argmin(distances)
                 if idx < P:
-                    row[idx] += 1.0
+                    row[idx] = 1.0
         elif mode == "value":
             # value模式：暂未实现
             pass

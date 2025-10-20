@@ -39,7 +39,7 @@ def get_args_parser():
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim'], help='Dataset type')
     a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.1-0.3 recommended for sparse data)')
-    a_parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss for imbalanced data')
+    a_parser.add_argument('--use_weighted_loss', default=False, type=bool, help='Use weighted loss for imbalanced data')
     a_parser.add_argument('--pos_weight', default=50.0, type=float, help='Positive class weight for weighted loss')
     
     return a_parser
@@ -89,7 +89,7 @@ def main(args):
         return b_v_metrics(pred, target, threshold=args.metrics_threshold)
     
     # 训练状态
-    best_score = -float('inf')
+    best_score = float('inf')  # 损失越小越好
     best_epoch = 0
     patience_counter = 0
     training_history = []  # 存储训练历史
@@ -123,26 +123,26 @@ def main(args):
             'val_metrics': val_metrics
         })
         
-        # 早停和模型保存
-        current_score = val_metrics.get('score', 0) if val_metrics else 0
-        is_best = current_score > best_score
+        # 早停和模型保存（使用验证损失指导）
+        current_loss = val_loss
+        is_best = current_loss < best_score  # 损失越小越好
         
         if is_best:
-            best_score = current_score
+            best_score = current_loss
             best_epoch = epoch + 1
             patience_counter = 0
             save_model(model, optimizer, epoch + 1, best_score, val_metrics, args.save_dir, timestamp)
-            print(f"🎯 新最佳模型! Score={best_score:.4f} ⭐ (耐心值重置)")
+            print(f"🎯 新最佳模型! Val_Loss={best_score:.4f} ⭐ (耐心值重置)")
         else:
             patience_counter += 1
-            print(f"⏳ 耐心值: {patience_counter}/{args.patience} (Score={current_score:.4f})")
+            print(f"⏳ 耐心值: {patience_counter}/{args.patience} (Val_Loss={current_loss:.4f})")
         
         # 早停检查
         if patience_counter >= args.patience:
             print(f"⏹️ 早停触发! 连续 {args.patience} 个epoch无改善")
             break
     
-    print(f"🏆 最佳模型在第 {best_epoch} 个epoch，综合分数: {best_score:.4f}")
+    print(f"🏆 最佳模型在第 {best_epoch} 个epoch，验证损失: {best_score:.4f}")
     
     # 测试阶段
     load_best_model(model, args.save_dir, timestamp)
