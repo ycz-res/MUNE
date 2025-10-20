@@ -80,7 +80,8 @@ class Sim(Dataset):
             return result
 
         raise FileNotFoundError(
-            f"未找到预处理文件: {preprocessed_npz}。请先运行预处理脚本生成 .npz 文件。"
+            "未找到预处理文件。请先运行预处理脚本生成 .npz 文件。"
+            + f" 已检查位置: {candidates}"
         )
     
     

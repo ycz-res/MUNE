@@ -29,7 +29,7 @@ def get_args_parser():
     a_parser.add_argument('--num_workers', default=0, type=int, help='Number of data loading workers')
     a_parser.add_argument('--pin_memory', default=False, type=bool, help='Pin memory for data loading')
     a_parser.add_argument('--device', default='cpu', type=str, help='Device to use (cpu/cuda)')
-    a_parser.add_argument('--lr', default=1e-5, type=float, help='Learning rate')
+    a_parser.add_argument('--lr', default=1e-4, type=float, help='Learning rate')
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay')
     a_parser.add_argument('--patience', default=5, type=int, help='Early stopping patience')
     a_parser.add_argument('--loss_type', default='ce', choices=['thr', 'focal', 'ce'], help='Loss function type: thr=threshold loss, focal=focal loss, ce=cross entropy')

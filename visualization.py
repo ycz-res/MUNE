@@ -85,6 +85,26 @@ class MUThresholdVisualizer:
         self.sample_predictions = []
         self.sample_targets = []
         
+        # 新增：验证指标历史（与metrics.py返回一致的键）
+        self.val_metrics_history = {
+            'Precision': [],
+            'Recall': [],
+            'F1': [],
+            'IoU': [],
+            'Score': []
+        }
+        
+        # 新增：测试汇总
+        self.test_loss = None
+        self.test_metrics = None
+        
+        # 新增：用于绘制随机测试样本
+        self.sample_indices = None           # List[int]
+        self.sample_cmap = None             # np.ndarray, shape (M, 500)
+        self.sample_thr_true = None         # np.ndarray, shape (M, 500)
+        self.sample_thr_pred = None         # np.ndarray, shape (M, 500)
+        self.sample_mus_true = None         # np.ndarray, shape (M,)
+        
     def update_epoch(self, epoch: int, train_loss: float, val_loss: float, 
                     test_loss: Optional[float] = None, metrics: Optional[Dict] = None):
         """
@@ -110,6 +130,153 @@ class MUThresholdVisualizer:
                     self.metrics_history[key].append(metrics[key])
                 else:
                     self.metrics_history[key].append(0.0)
+            # 记录与metrics.py一致的验证指标
+            for k in self.val_metrics_history.keys():
+                self.val_metrics_history[k].append(float(metrics.get(k, 0.0)))
+
+    # ==== 新增：设置测试结果 ====
+    def set_test_results(self, test_loss: float, test_metrics: Dict[str, float]):
+        self.test_loss = float(test_loss)
+        # 只保留关心的键
+        self.test_metrics = {
+            'Precision': float(test_metrics.get('Precision', 0.0)),
+            'Recall': float(test_metrics.get('Recall', 0.0)),
+            'F1': float(test_metrics.get('F1', 0.0)),
+            'IoU': float(test_metrics.get('IoU', 0.0)),
+            'Score': float(test_metrics.get('Score', 0.0)),
+        }
+
+    # ==== 新增：设置用于随机样本可视化的数据 ====
+    def set_sample_data(
+        self,
+        sample_indices: List[int],
+        cmap: np.ndarray,
+        thresholds_true: np.ndarray,
+        thresholds_pred: np.ndarray,
+        mus_true: np.ndarray,
+    ):
+        self.sample_indices = list(sample_indices)
+        self.sample_cmap = np.asarray(cmap)
+        self.sample_thr_true = np.asarray(thresholds_true)
+        self.sample_thr_pred = np.asarray(thresholds_pred)
+        self.sample_mus_true = np.asarray(mus_true)
+
+    # ==== 新增：图1 训练/验证损失曲线 ====
+    def plot_loss_curves(self):
+        plt.figure(figsize=(8, 5))
+        plt.plot(self.epochs, self.train_losses, 'b-o', label='Train Loss', markersize=3)
+        plt.plot(self.epochs, self.val_losses, 'r-s', label='Val Loss', markersize=3)
+        plt.xlabel('Epoch')
+        plt.ylabel('Loss')
+        plt.title('Training vs Validation Loss')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        out = os.path.join(self.save_dir, 'loss_curves.png')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # ==== 新增：图2 验证指标曲线 ====
+    def plot_val_metrics_curves(self):
+        plt.figure(figsize=(9, 5))
+        for key, style in zip(['Precision', 'Recall', 'F1', 'IoU', 'Score'], ['b-', 'g-', 'r-', 'm-', 'k-']):
+            vals = self.val_metrics_history.get(key, [])
+            if vals:
+                plt.plot(self.epochs, vals, style, label=key)
+        plt.xlabel('Epoch')
+        plt.ylabel('Value')
+        plt.title('Validation Metrics Over Epochs')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        out = os.path.join(self.save_dir, 'val_metrics_curves.png')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # ==== 新增：图3 测试指标柱状图 ====
+    def plot_test_metrics_hist(self):
+        if self.test_loss is None or self.test_metrics is None:
+            return
+        labels = ['Loss', 'Precision', 'Recall', 'F1', 'IoU', 'Score']
+        values = [self.test_loss] + [float(self.test_metrics.get(k, 0.0)) for k in labels[1:]]
+        plt.figure(figsize=(8, 5))
+        x = np.arange(len(labels))
+        plt.bar(x, values, color=['#4e79a7', '#59a14f', '#f28e2b', '#e15759', '#76b7b2', '#9c755f'])
+        plt.xticks(x, labels)
+        for xi, v in zip(x, values):
+            plt.text(xi, v, f'{v:.3f}', ha='center', va='bottom', fontsize=9)
+        plt.ylabel('Value')
+        plt.title('Test Metrics Summary')
+        plt.grid(True, axis='y', alpha=0.2)
+        out = os.path.join(self.save_dir, 'test_metrics_summary.png')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # ==== 新增：图4 随机抽取测试样本进行阈值对比 ====
+    def plot_random_test_samples(self):
+        if self.sample_indices is None or self.sample_cmap is None or self.sample_thr_true is None or self.sample_thr_pred is None:
+            return
+        indices = self.sample_indices
+        cmap = self.sample_cmap
+        thr_true = self.sample_thr_true
+        thr_pred = self.sample_thr_pred
+        mus_true = self.sample_mus_true if self.sample_mus_true is not None else None
+        num = len(indices)
+        rows, cols = 4, 5
+        rows = max(1, min(rows, int(np.ceil(num / cols))))
+        cols = min(cols, num) if num < cols else cols
+        fig, axes = plt.subplots(rows, cols, figsize=(cols * 4, rows * 3), squeeze=False)
+        fig.suptitle('Random Test Samples: True vs Predicted Thresholds', fontsize=14)
+        x_positions = np.arange(500)
+        for i, idx in enumerate(indices):
+            r, c = divmod(i, cols)
+            ax = axes[r][c]
+            y_vals = cmap[i]
+            ax.plot(x_positions, y_vals, 'bo', markersize=2, label='CMAP')
+            # Compute positions
+            true_pos = set(np.where(thr_true[i] > 0)[0].tolist())
+            pred_pos = set(np.where(thr_pred[i] > 0)[0].tolist())
+
+            match_pos = sorted(true_pos & pred_pos)
+            true_only_pos = sorted(true_pos - pred_pos)
+            pred_only_pos = sorted(pred_pos - true_pos)
+
+            # Draw matches in green
+            for p in match_pos:
+                ax.axvline(x=p, color='green', linestyle='-', linewidth=1.4, alpha=0.9)
+
+            # Draw true-only in blue
+            for p in true_only_pos:
+                ax.axvline(x=p, color='#1f77b4', linestyle='--', linewidth=1.2, alpha=0.9)
+
+            # Draw pred-only in orange
+            for p in pred_only_pos:
+                ax.axvline(x=p, color='orange', linestyle='-', linewidth=1.2, alpha=0.9)
+            true_mu = int(mus_true[i]) if mus_true is not None else len(true_pos)
+            pred_mu = int(np.sum(thr_pred[i] == 1.0))
+            ax.set_title(f'ID {idx} | True MU: {true_mu} | Pred MU: {pred_mu}', fontsize=9)
+            ax.set_xlim(0, 499)
+            ax.set_ylim(0, 1.1)
+            ax.grid(True, alpha=0.2)
+        # 隐藏未使用子图
+        total_ax = rows * cols
+        for k in range(num, total_ax):
+            r, c = divmod(k, cols)
+            axes[r][c].axis('off')
+        plt.tight_layout(rect=[0, 0, 1, 0.96])
+        out = os.path.join(self.save_dir, 'random_test_samples.png')
+        plt.savefig(out, dpi=300, bbox_inches='tight')
+        plt.close()
+
+    # ==== 新增：一键生成四张图 ====
+    def generate_four_figs(self):
+        self.plot_loss_curves()
+        self.plot_val_metrics_curves()
+        self.plot_test_metrics_hist()
+        self.plot_random_test_samples()
+        print(f"📊 Saved: {os.path.join(self.save_dir, 'loss_curves.png')}")
+        print(f"📊 Saved: {os.path.join(self.save_dir, 'val_metrics_curves.png')}")
+        if self.test_loss is not None and self.test_metrics is not None:
+            print(f"📊 Saved: {os.path.join(self.save_dir, 'test_metrics_summary.png')}")
+        print(f"📊 Saved: {os.path.join(self.save_dir, 'random_test_samples.png')}")
     
     def update_prediction_stats(self, predicted_mu_counts: List[int], 
                               true_mu_counts: List[int],
