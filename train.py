@@ -149,6 +149,10 @@ def main(args):
     print("🧪 测试阶段")
     test_loss, test_metrics = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device)
     
+    # 收集随机测试样本用于可视化
+    print("📊 收集测试样本用于可视化...")
+    sample_data = collect_test_samples(model, test_loader, args.device, num_samples=20, threshold=args.metrics_threshold)
+    
     # 打印测试指标
     print(f"✅ 测试完成, 平均损失: {test_loss:.6f}")
     if test_metrics:
@@ -161,25 +165,8 @@ def main(args):
         training_history=training_history,
         test_loss=test_loss,
         test_metrics=test_metrics,
-        best_epoch=best_epoch,
-        best_score=best_score,
-        model_info={
-            "模型类型": args.model_type,
-            "隐藏维度": 64,
-            "优化器": "AdamW",
-            "学习率": args.lr,
-            "权重衰减": args.weight_decay,
-            "损失函数": args.loss_type,
-            "早停耐心": args.patience
-        },
-        dataset_info={
-            "训练样本数": len(train_dataset),
-            "验证样本数": len(val_dataset),
-            "测试样本数": len(test_dataset),
-            "批次大小": args.batch_size
-        },
-        save_dir=curves_dir,
-        timestamp=timestamp
+        sample_data=sample_data,
+        save_dir=curves_dir
     )
 
 
@@ -282,8 +269,7 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")
 
 
-def generate_training_report(training_history, test_loss, test_metrics, best_epoch, best_score, 
-                           model_info, dataset_info, save_dir, timestamp):
+def generate_training_report(training_history, test_loss, test_metrics, sample_data, save_dir):
     """生成训练报告和可视化图表"""
     visualizer = MUThresholdVisualizer(save_dir)
     
@@ -292,15 +278,26 @@ def generate_training_report(training_history, test_loss, test_metrics, best_epo
         visualizer.update_epoch(
             epoch_data['epoch'], 
             epoch_data['train_loss'], 
-            epoch_data['val_loss']
+            epoch_data['val_loss'],
+            metrics=epoch_data.get('val_metrics')
         )
     
-    # 生成综合报告
-    visualizer.generate_comprehensive_report(
-        test_loss=test_loss,
-        model_info=model_info,
-        dataset_info=dataset_info
-    )
+    # 设置测试结果
+    if test_metrics:
+        visualizer.set_test_results(test_loss, test_metrics)
+    
+    # 设置样本数据
+    if sample_data:
+        visualizer.set_sample_data(
+            sample_data['indices'],
+            sample_data['cmap'],
+            sample_data['thresholds_true'],
+            sample_data['thresholds_pred'],
+            sample_data['mus_true']
+        )
+    
+    # 生成四张图
+    visualizer.generate_four_figs()
     
     print(f"📊 训练报告已生成: {save_dir}")
 
@@ -315,6 +312,59 @@ def save_model(model, optimizer, epoch, best_score, val_metrics, save_dir, times
         'best_score': best_score,
         'val_metrics': val_metrics
     }, model_path)
+
+
+def collect_test_samples(model, test_loader, device, num_samples=20, threshold=0.5):
+    """直接通过索引收集随机测试样本"""
+    model.eval()
+    
+    print(f"  🔍 收集 {num_samples} 个随机测试样本...")
+    
+    # 获取测试集总样本数
+    test_dataset = test_loader.dataset
+    total_samples = len(test_dataset)
+    
+    # 调整样本数
+    if num_samples > total_samples:
+        num_samples = total_samples
+        print(f"  ⚠️  请求样本数超过测试集大小，调整为 {num_samples}")
+    
+    # 生成随机索引
+    random_indices = torch.randperm(total_samples)[:num_samples].tolist()
+    print(f"  📊 从 {total_samples} 个样本中随机选择了 {num_samples} 个")
+    
+    # 直接通过索引获取样本
+    cmap_list = []
+    thresholds_true_list = []
+    mus_true_list = []
+    
+    for idx in random_indices:
+        cmap_data, mu_count, threshold_data = test_dataset[idx]
+        cmap_list.append(cmap_data)
+        thresholds_true_list.append(threshold_data)
+        mus_true_list.append(mu_count)
+    
+    # 转换为tensor并移到设备
+    cmap_tensor = torch.stack(cmap_list).to(device)
+    
+    # 批量预测
+    print(f"  🎯 对 {num_samples} 个样本进行批量预测（阈值={threshold}）...")
+    with torch.no_grad():
+        thresholds_pred_raw = model(cmap_tensor)
+        # 二值化预测结果（使用指定阈值）
+        thresholds_pred = (torch.sigmoid(thresholds_pred_raw) >= threshold).float()
+    
+    # 组装结果
+    sample_data = {
+        'indices': random_indices,
+        'cmap': cmap_tensor.cpu().numpy(),
+        'thresholds_true': torch.stack(thresholds_true_list).cpu().numpy(),
+        'thresholds_pred': thresholds_pred.cpu().numpy(),
+        'mus_true': torch.stack(mus_true_list).cpu().numpy()
+    }
+    
+    print(f"  ✅ 样本收集完成: {len(sample_data['indices'])} 个样本")
+    return sample_data
 
 
 def load_best_model(model, save_dir, timestamp):
