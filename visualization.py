@@ -91,6 +91,7 @@ class MUThresholdVisualizer:
             'Recall': [],
             'F1': [],
             'IoU': [],
+            'EMD': [],
             'Score': []
         }
         
@@ -143,6 +144,7 @@ class MUThresholdVisualizer:
             'Recall': float(test_metrics.get('Recall', 0.0)),
             'F1': float(test_metrics.get('F1', 0.0)),
             'IoU': float(test_metrics.get('IoU', 0.0)),
+            'EMD': float(test_metrics.get('EMD', 0.0)),
             'Score': float(test_metrics.get('Score', 0.0)),
         }
 
@@ -177,16 +179,26 @@ class MUThresholdVisualizer:
 
     # ==== 新增：图2 验证指标曲线 ====
     def plot_val_metrics_curves(self):
-        plt.figure(figsize=(9, 5))
+        plt.figure(figsize=(10, 6))
+        # 主要指标（左y轴）
         for key, style in zip(['Precision', 'Recall', 'F1', 'IoU', 'Score'], ['b-', 'g-', 'r-', 'm-', 'k-']):
             vals = self.val_metrics_history.get(key, [])
             if vals:
-                plt.plot(self.epochs, vals, style, label=key)
+                plt.plot(self.epochs, vals, style, label=key, linewidth=2)
+        
+        # EMD指标（右y轴，越小越好）
+        emd_vals = self.val_metrics_history.get('EMD', [])
+        if emd_vals:
+            ax2 = plt.gca().twinx()
+            ax2.plot(self.epochs, emd_vals, 'orange', linestyle='--', label='EMD', linewidth=2)
+            ax2.set_ylabel('EMD (越大越好)', color='orange')
+            ax2.tick_params(axis='y', labelcolor='orange')
+        
         plt.xlabel('Epoch')
         plt.ylabel('Value')
         plt.title('Validation Metrics Over Epochs')
         plt.grid(True, alpha=0.3)
-        plt.legend()
+        plt.legend(loc='upper left')
         out = os.path.join(self.save_dir, 'val_metrics_curves.png')
         plt.savefig(out, dpi=300, bbox_inches='tight')
         plt.close()
@@ -195,11 +207,12 @@ class MUThresholdVisualizer:
     def plot_test_metrics_hist(self):
         if self.test_loss is None or self.test_metrics is None:
             return
-        labels = ['Loss', 'Precision', 'Recall', 'F1', 'IoU', 'Score']
+        labels = ['Loss', 'Precision', 'Recall', 'F1', 'IoU', 'EMD', 'Score']
         values = [self.test_loss] + [float(self.test_metrics.get(k, 0.0)) for k in labels[1:]]
-        plt.figure(figsize=(8, 5))
+        plt.figure(figsize=(10, 5))
         x = np.arange(len(labels))
-        plt.bar(x, values, color=['#4e79a7', '#59a14f', '#f28e2b', '#e15759', '#76b7b2', '#9c755f'])
+        colors = ['#4e79a7', '#59a14f', '#f28e2b', '#e15759', '#76b7b2', '#ff7f0e', '#9c755f']
+        plt.bar(x, values, color=colors)
         plt.xticks(x, labels)
         for xi, v in zip(x, values):
             plt.text(xi, v, f'{v:.3f}', ha='center', va='bottom', fontsize=9)

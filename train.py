@@ -23,7 +23,7 @@ from metrics import b_v_metrics
 
 def get_args_parser():
     a_parser = argparse.ArgumentParser('MU Threshold Prediction Training', add_help=False)
-    a_parser.add_argument('--batch_size', default=2, type=int, help='Batch size for training')
+    a_parser.add_argument('--batch_size', default=4, type=int, help='Batch size for training')
     a_parser.add_argument('--epochs', default=10, type=int, help='Number of training epochs')
     a_parser.add_argument('--shuffle', default=True, type=bool, help='Shuffle training data')
     a_parser.add_argument('--num_workers', default=0, type=int, help='Number of data loading workers')
@@ -33,7 +33,7 @@ def get_args_parser():
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay')
     a_parser.add_argument('--patience', default=5, type=int, help='Early stopping patience')
     a_parser.add_argument('--loss_type', default='ce', choices=['thr', 'focal', 'ce'], help='Loss function type: thr=threshold loss, focal=focal loss, ce=cross entropy')
-    a_parser.add_argument('--model_type', default='Linear', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
+    a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
     a_parser.add_argument('--save_best', default=True, type=bool, help='Save best model')
     a_parser.add_argument('--save_dir', default='checkpoints', type=str, help='Directory to save models')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
