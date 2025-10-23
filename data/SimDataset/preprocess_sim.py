@@ -111,15 +111,32 @@ def fix_transpose_and_extract(mat: Dict[str, np.ndarray]) -> Dict[str, np.ndarra
     return {"data": data, "label_num": label_num.astype(np.float32), "muThr": mu_thr.astype(np.float32)}
 
 
-def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary") -> str:
+def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary", 
+               start_ratio: float = 0.0, end_ratio: float = 1.0) -> str:
     """
     预处理入口：读取 .mat -> 修复维度 -> 归一化/映射 -> 保存 .npz
-    返回保存文件的路径。
+    
+    Args:
+        mat_path: .mat 文件路径
+        output_path: 输出 .npz 文件路径
+        threshold_mode: 阈值映射模式 ('binary' 或 'value')
+        start_ratio: 起始位置比例，范围 [0, 1)，默认 0.0 表示从头开始
+        end_ratio: 结束位置比例，范围 (0, 1]，默认 1.0 表示到末尾
+    
+    Returns:
+        保存文件的路径
     """
     if threshold_mode not in ("binary", "value"):
         raise ValueError("threshold_mode 必须为 'binary' 或 'value'")
+    
+    if not (0.0 <= start_ratio < 1.0):
+        raise ValueError("start_ratio 必须在 [0, 1) 范围内")
+    if not (0.0 < end_ratio <= 1.0):
+        raise ValueError("end_ratio 必须在 (0, 1] 范围内")
+    if start_ratio >= end_ratio:
+        raise ValueError("start_ratio 必须小于 end_ratio")
 
-    mat = load_mat_data(mat_path, lazy=False)
+    mat = load_mat_data(mat_path, lazy=False, start_ratio=start_ratio, end_ratio=end_ratio)
 
     fixed = fix_transpose_and_extract(mat)
     data = fixed["data"]
@@ -149,9 +166,11 @@ def main():
     parser.add_argument("--mat", default="./data.mat", help="源 .mat 路径（默认: ./data.mat）")
     parser.add_argument("--mode", default="binary", choices=["binary", "value"], help="阈值映射模式")
     parser.add_argument("--out", default="./data.npz", help="输出文件路径 (默认: ./data.npz)")
+    parser.add_argument("--start", type=float, default=0.0, help="起始位置比例，范围 [0, 1)，默认 0.0 表示从头开始")
+    parser.add_argument("--end", type=float, default=1.0, help="结束位置比例，范围 (0, 1]，默认 1.0 表示到末尾")
     args = parser.parse_args()
 
-    saved = preprocess(args.mat, args.out, args.mode)
+    saved = preprocess(args.mat, args.out, args.mode, args.start, args.end)
     print(f"✅ 预处理完成，已保存: {saved}")
 
 

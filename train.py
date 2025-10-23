@@ -16,9 +16,9 @@ from dataset import Sim
 from config import get_config
 from model import Linear, CNN, LSTM
 from loss import ce, focal_ce, thr
-from visualization import MUThresholdVisualizer
 from utils import set_seed
 from metrics import b_v_metrics
+import json
 
 
 def get_args_parser():
@@ -28,7 +28,7 @@ def get_args_parser():
     a_parser.add_argument('--shuffle', default=True, type=bool, help='Shuffle training data')
     a_parser.add_argument('--num_workers', default=0, type=int, help='Number of data loading workers')
     a_parser.add_argument('--pin_memory', default=False, type=bool, help='Pin memory for data loading')
-    a_parser.add_argument('--device', default='cpu', type=str, help='Device to use (cpu/cuda)')
+    a_parser.add_argument('--device', default='cuda', type=str, help='Device to use (cpu/cuda)')
     a_parser.add_argument('--lr', default=1e-4, type=float, help='Learning rate')
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay')
     a_parser.add_argument('--patience', default=5, type=int, help='Early stopping patience')
@@ -52,7 +52,7 @@ def main(args):
     
     # 创建保存目录
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    curves_dir = f"plot/training_curves_{timestamp}"
+    curves_dir = os.path.join("plot", "curve_data")
     os.makedirs(curves_dir, exist_ok=True)
     os.makedirs(args.save_dir, exist_ok=True)
     
@@ -60,7 +60,6 @@ def main(args):
     # 数据划分比例：训练集90%，验证集5%，测试集5%
     train_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.0, end_percent=0.9, stage='train', threshold_mode=args.threshold_mode)
     val_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.9, end_percent=0.95, stage='val', threshold_mode=args.threshold_mode)
-    test_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.95, end_percent=1.0, stage='test', threshold_mode=args.threshold_mode)
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
                              collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 
@@ -68,9 +67,7 @@ def main(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, 
                            collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 
                            pin_memory=args.pin_memory)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, 
-                            collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 
-                            pin_memory=args.pin_memory)
+
 
     # 初始化训练组件
     model = eval(args.model_type)(d_model=64).to(args.device)
@@ -94,7 +91,11 @@ def main(args):
     patience_counter = 0
     training_history = []  # 存储训练历史
     
-    print(f"🚀 开始训练: {args.model_type} + {args.loss_type} | 数据集: {len(train_dataset)}/{len(val_dataset)}/{len(test_dataset)} | Epochs: {args.epochs}")
+    # 组装保存路径
+    best_model_path = os.path.join(args.save_dir, f'best_model_{timestamp}.pth')
+    train_data_path = os.path.join(curves_dir, f'train_{timestamp}.json')
+    
+    print(f"🚀 开始训练: {args.model_type} + {args.loss_type} | 数据集: {len(train_dataset)}/{len(val_dataset)} | Epochs: {args.epochs}")
     
     # 训练循环
     for epoch in range(args.epochs):
@@ -131,7 +132,7 @@ def main(args):
             best_score = current_loss
             best_epoch = epoch + 1
             patience_counter = 0
-            save_model(model, optimizer, epoch + 1, best_score, val_metrics, args.save_dir, timestamp)
+            save_model(model, optimizer, epoch + 1, best_score, val_metrics, best_model_path)
             print(f"🎯 新最佳模型! Val_Loss={best_score:.4f} ⭐ (耐心值重置)")
         else:
             patience_counter += 1
@@ -144,30 +145,20 @@ def main(args):
     
     print(f"🏆 最佳模型在第 {best_epoch} 个epoch，验证损失: {best_score:.4f}")
     
-    # 测试阶段
-    load_best_model(model, args.save_dir, timestamp)
-    print("🧪 测试阶段")
-    test_loss, test_metrics = validate_epoch(model, test_loader, loss_fn, metrics_fn, args.device)
-    
-    # 收集随机测试样本用于可视化
-    print("📊 收集测试样本用于可视化...")
-    sample_data = collect_test_samples(model, test_loader, args.device, num_samples=20, threshold=args.metrics_threshold)
-    
-    # 打印测试指标
-    print(f"✅ 测试完成, 平均损失: {test_loss:.6f}")
-    if test_metrics:
-        print(f"test_metrics: {test_metrics}")
-    else:
-        print("test_metrics: None")
-    
-    # 生成可视化报告
-    generate_training_report(
+    # 保存训练数据
+    print("\n📊 保存训练数据...")
+    save_training_data(
         training_history=training_history,
-        test_loss=test_loss,
-        test_metrics=test_metrics,
-        sample_data=sample_data,
-        save_dir=curves_dir
+        save_path=train_data_path,
+        timestamp=timestamp,
+        best_model_path=best_model_path
     )
+    
+    print(f"\n✅ 训练完成! 最佳模型已保存")
+    print(f"   - 模型路径: {best_model_path}")
+    print(f"   - 训练数据: {train_data_path}")
+    print(f"\n💡 使用以下命令进行测试:")
+    print(f"   python3 test.py --checkpoint {best_model_path}")
 
 
 def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, total_epochs):
@@ -269,110 +260,34 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")
 
 
-def generate_training_report(training_history, test_loss, test_metrics, sample_data, save_dir):
-    """生成训练报告和可视化图表"""
-    visualizer = MUThresholdVisualizer(save_dir)
+def save_training_data(training_history, save_path, timestamp, best_model_path):
+    """保存训练数据为JSON格式"""
+    # 准备保存的数据
+    training_data = {
+        'timestamp': timestamp,
+        'total_epochs': len(training_history),
+        'best_model_path': best_model_path,
+        'training_history': training_history
+    }
     
-    # 更新训练历史
-    for epoch_data in training_history:
-        visualizer.update_epoch(
-            epoch_data['epoch'], 
-            epoch_data['train_loss'], 
-            epoch_data['val_loss'],
-            metrics=epoch_data.get('val_metrics')
-        )
+    # 保存为JSON
+    with open(save_path, 'w', encoding='utf-8') as f:
+        json.dump(training_data, f, indent=2, ensure_ascii=False)
     
-    # 设置测试结果
-    if test_metrics:
-        visualizer.set_test_results(test_loss, test_metrics)
-    
-    # 设置样本数据
-    if sample_data:
-        visualizer.set_sample_data(
-            sample_data['indices'],
-            sample_data['cmap'],
-            sample_data['thresholds_true'],
-            sample_data['thresholds_pred'],
-            sample_data['mus_true']
-        )
-    
-    # 生成四张图
-    visualizer.generate_four_figs()
-    
-    print(f"📊 训练报告已生成: {save_dir}")
+    print(f"✅ 训练数据已保存: {save_path}")
 
 
-def save_model(model, optimizer, epoch, best_score, val_metrics, save_dir, timestamp):
+def save_model(model, optimizer, epoch, best_score, val_metrics, save_path):
     """保存最佳模型"""
-    model_path = os.path.join(save_dir, f'best_model_{timestamp}.pth')
     torch.save({
         'epoch': epoch,
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
         'best_score': best_score,
         'val_metrics': val_metrics
-    }, model_path)
+    }, save_path)
 
 
-def collect_test_samples(model, test_loader, device, num_samples=20, threshold=0.5):
-    """直接通过索引收集随机测试样本"""
-    model.eval()
-    
-    print(f"  🔍 收集 {num_samples} 个随机测试样本...")
-    
-    # 获取测试集总样本数
-    test_dataset = test_loader.dataset
-    total_samples = len(test_dataset)
-    
-    # 调整样本数
-    if num_samples > total_samples:
-        num_samples = total_samples
-        print(f"  ⚠️  请求样本数超过测试集大小，调整为 {num_samples}")
-    
-    # 生成随机索引
-    random_indices = torch.randperm(total_samples)[:num_samples].tolist()
-    print(f"  📊 从 {total_samples} 个样本中随机选择了 {num_samples} 个")
-    
-    # 直接通过索引获取样本
-    cmap_list = []
-    thresholds_true_list = []
-    mus_true_list = []
-    
-    for idx in random_indices:
-        cmap_data, mu_count, threshold_data = test_dataset[idx]
-        cmap_list.append(cmap_data)
-        thresholds_true_list.append(threshold_data)
-        mus_true_list.append(mu_count)
-    
-    # 转换为tensor并移到设备
-    cmap_tensor = torch.stack(cmap_list).to(device)
-    
-    # 批量预测
-    print(f"  🎯 对 {num_samples} 个样本进行批量预测（阈值={threshold}）...")
-    with torch.no_grad():
-        thresholds_pred_raw = model(cmap_tensor)
-        # 二值化预测结果（使用指定阈值）
-        thresholds_pred = (torch.sigmoid(thresholds_pred_raw) >= threshold).float()
-    
-    # 组装结果
-    sample_data = {
-        'indices': random_indices,
-        'cmap': cmap_tensor.cpu().numpy(),
-        'thresholds_true': torch.stack(thresholds_true_list).cpu().numpy(),
-        'thresholds_pred': thresholds_pred.cpu().numpy(),
-        'mus_true': torch.stack(mus_true_list).cpu().numpy()
-    }
-    
-    print(f"  ✅ 样本收集完成: {len(sample_data['indices'])} 个样本")
-    return sample_data
-
-
-def load_best_model(model, save_dir, timestamp):
-    """加载最佳模型"""
-    model_path = os.path.join(save_dir, f'best_model_{timestamp}.pth')
-    if os.path.exists(model_path):
-        checkpoint = torch.load(model_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
 
 
 
