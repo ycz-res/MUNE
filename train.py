@@ -11,6 +11,10 @@ import os
 from datetime import datetime
 import numpy as np
 import time
+import warnings
+
+# 忽略 NVML 警告
+warnings.filterwarnings('ignore', message='.*NVML.*')
 
 from dataset import Sim
 from config import get_config
@@ -37,10 +41,10 @@ def get_args_parser():
     a_parser.add_argument('--save_best', default=True, type=bool, help='Save best model')
     a_parser.add_argument('--save_dir', default='checkpoints', type=str, help='Directory to save models')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
-    a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim'], help='Dataset type')
+    a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
     a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.1-0.3 recommended for sparse data)')
-    a_parser.add_argument('--use_weighted_loss', default=False, type=bool, help='Use weighted loss for imbalanced data')
-    a_parser.add_argument('--pos_weight', default=50.0, type=float, help='Positive class weight for weighted loss')
+    a_parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss for imbalanced data')
+    a_parser.add_argument('--pos_weight', default=7.0, type=float, help='Positive class weight for weighted loss')
     
     return a_parser
 
@@ -58,8 +62,8 @@ def main(args):
     
     Dataset = eval(args.dataset_type)
     # 数据划分比例：训练集90%，验证集5%，测试集5%
-    train_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.0, end_percent=0.9, stage='train', threshold_mode=args.threshold_mode)
-    val_dataset = Dataset(config['SimDataset.data'], 'sim', start_percent=0.9, end_percent=0.95, stage='val', threshold_mode=args.threshold_mode)
+    train_dataset = Dataset(config['SimDataset.data'], args.dataset_type, start_percent=0.0, end_percent=0.9, stage='train', threshold_mode=args.threshold_mode)
+    val_dataset = Dataset(config['SimDataset.data'], args.dataset_type, start_percent=0.9, end_percent=0.95, stage='val', threshold_mode=args.threshold_mode)
     
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
                              collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 

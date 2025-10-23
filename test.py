@@ -9,6 +9,10 @@ import argparse
 import os
 import glob
 import numpy as np
+import warnings
+
+# 忽略 NVML 警告
+warnings.filterwarnings('ignore', message='.*NVML.*')
 
 from dataset import Sim
 from config import get_config
@@ -23,8 +27,9 @@ def get_args_parser():
     parser = argparse.ArgumentParser('MU Threshold Prediction Testing', add_help=False)
     parser.add_argument('--device', default='cuda', type=str, help='Device to use (cpu/cuda)')
     parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
+    parser.add_argument('--hidden_size', default=64, type=int, help='Hidden size for LSTM model')
     parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode')
-    parser.add_argument('--dataset_type', default='Sim', choices=['Sim'], help='Dataset type')
+    parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
     parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation')
     parser.add_argument('--timestamp', default=None, type=str, help='Model timestamp (e.g., 20251023_123456). If provided, load {checkpoint}/best_model_{timestamp}.pth')
     parser.add_argument('--checkpoint', default='checkpoints', type=str, help='Directory containing model checkpoints')
@@ -32,8 +37,8 @@ def get_args_parser():
     parser.add_argument('--num_collect', default=20, type=int, help='Number of samples to collect and save (0=do not collect)')
     parser.add_argument('--save_samples', default=True, type=bool, help='Save sample data in JSON')
     parser.add_argument('--loss_type', default='ce', choices=['thr', 'focal', 'ce'], help='Loss function type')
-    parser.add_argument('--use_weighted_loss', default=False, type=bool, help='Use weighted loss')
-    parser.add_argument('--pos_weight', default=50.0, type=float, help='Positive class weight')
+    parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss')
+    parser.add_argument('--pos_weight', default=7.0, type=float, help='Positive class weight')
     
     return parser
 
@@ -65,7 +70,7 @@ def get_latest_timestamp(checkpoint_dir: str = 'checkpoints'):
     return timestamp
 
 
-def load_best_model(model_type, timestamp, checkpoint_dir, device):
+def load_best_model(model_type, timestamp, checkpoint_dir, device, hidden_size=64):
     """
     根据时间戳加载最佳模型
     
@@ -74,6 +79,7 @@ def load_best_model(model_type, timestamp, checkpoint_dir, device):
         timestamp: 模型时间戳
         checkpoint_dir: checkpoint目录
         device: 设备
+        hidden_size: 模型的隐藏层大小 (d_model)
     
     Returns:
         model: 加载权重后的模型
@@ -85,7 +91,7 @@ def load_best_model(model_type, timestamp, checkpoint_dir, device):
     
     # 创建模型并加载权重
     try:
-        model = eval(model_type)().to(device)
+        model = eval(model_type)(d_model=hidden_size).to(device)
     except (NameError, AttributeError) as e:
         raise ValueError(f"无法创建模型 '{model_type}': {e}")
     
@@ -94,6 +100,7 @@ def load_best_model(model_type, timestamp, checkpoint_dir, device):
     
     # 打印加载信息
     print(f"✅ 成功加载模型: {checkpoint_path}")
+    print(f"   模型类型={model_type}, d_model={hidden_size}")
     
     return model
 
@@ -271,7 +278,7 @@ def main(args):
     
     # 创建并加载模型
     print(f"\n🔧 创建并加载模型: {args.model_type}")
-    model = load_best_model(args.model_type, timestamp, args.checkpoint, args.device)
+    model = load_best_model(args.model_type, timestamp, args.checkpoint, args.device, args.hidden_size)
     
     # 创建损失函数（支持加权）
     if args.use_weighted_loss and args.loss_type == 'ce':

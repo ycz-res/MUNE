@@ -46,9 +46,9 @@ class Sim(Dataset):
               f"使用范围=[{self.start_idx}:{self.end_idx}], 实际样本数={self.num_samples}")
     
     def __load_data(self, data_type: str):
-        if data_type == 'sim':
+        if data_type == 'Sim':
             return self.__load_sim_data()
-        elif data_type == 'real':
+        elif data_type == 'Real':
             return self.__load_real_data()
         else:
             raise ValueError(f"不支持的数据类型: {data_type}")
