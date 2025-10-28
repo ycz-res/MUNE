@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from typing import Literal
 
 def thr(thresholds_pred, thresholds_target, 
              lambda_count=20.0, lambda_pos=10.0, lambda_val=1.0, lambda_sparse=0.5):
@@ -124,3 +125,116 @@ def focal_ce(thresholds_pred, thresholds_target, gamma=2.0, alpha=0.25, reductio
         return loss.sum()
     else:
         return loss  # 保留逐元素损失（例如用于调试或可视化）
+
+# 语义化枚举
+NormalizeT = Literal["none", "per_one", "per_length"]
+PairingStrategyT = Literal["truncate", "sink_right", "sink_left"]
+AggregationT = Literal["none", "mean", "sum"]
+ModeT = Literal["prefix", "pair"]
+
+def emd(
+    predictions: torch.Tensor,      # (batch_size, L) 预测 0/1 序列
+    targets: torch.Tensor,          # (batch_size, L) 真实 0/1 序列
+    *,
+    mode: ModeT = "prefix",                 # "prefix" 可导（训练） | "pair" 不可导（评估）
+    normalization: NormalizeT = "per_one",  # "none" | "per_one" | "per_length"
+    pairing_strategy: PairingStrategyT = "truncate",  # 仅 pair 用
+    aggregation: AggregationT = "mean",     # "none" | "mean" | "sum"
+) -> torch.Tensor:
+    """
+    统一版 EMD（A/B 同长，元素为 0/1；L 自适应）：
+      - mode="prefix": 前缀流量法（可导，训练主损失推荐）
+      - mode="pair"  : 配对法（不可导，评估/日志；支持 truncate/sink_right/sink_left）
+
+    normalization:
+      - "none"       ：原始搬运量
+      - "per_one"    ：/ max(#1_pred, #1_true) —— "每目标平均位移"
+      - "per_length" ：/ L —— "单位长度搬运密度"（L=序列长度）
+    """
+    # 基本校验
+    assert predictions.dim() == 2 and targets.dim() == 2, "predictions/targets 需为 (B, L)"
+    assert predictions.shape == targets.shape, "predictions 与 targets 形状需一致"
+    B, L = predictions.shape
+    device = predictions.device
+
+    # 转 float 运算（输入应为 0/1）
+    p = predictions.to(torch.float32)  # (B, L)
+    t = targets.to(torch.float32)      # (B, L)
+
+    if mode == "prefix":
+        # —— 可导：EMD = Σ |cumsum(p) - cumsum(t)| —— #
+        flow = (torch.cumsum(p, dim=1) - torch.cumsum(t, dim=1)).abs()  # (B, L)
+        loss_vec = flow.sum(dim=1)                                      # (B,)
+
+        if normalization == "per_one":
+            denom = torch.maximum(p.sum(dim=1), t.sum(dim=1)).clamp_min(1e-8)
+            loss_vec = loss_vec / denom
+        elif normalization == "per_length":
+            loss_vec = loss_vec / float(max(L, 1))
+
+    elif mode == "pair":
+        # —— 不可导：配对法（批量向量化，无 Python for） —— #
+        with torch.no_grad():
+            p_bin = predictions.to(torch.long)  # 已是 0/1
+            t_bin = targets.to(torch.long)
+
+            n_pred_ones = p_bin.sum(dim=1)                  # (B,)
+            n_true_ones = t_bin.sum(dim=1)                  # (B,)
+            n_pairs     = torch.minimum(n_pred_ones, n_true_ones)  # (B,)
+            K = int(n_pairs.max().item()) if B > 0 else 0
+
+            if K == 0:
+                if pairing_strategy == "truncate":
+                    loss_vec = torch.zeros(B, device=device, dtype=torch.float32)
+                else:
+                    idx = torch.arange(L, device=device).view(1, L)     # (1, L)
+                    sink = L if pairing_strategy == "sink_right" else -1
+                    extra_cost = ((p_bin * (idx - sink).abs()).sum(dim=1) +
+                                  (t_bin * (idx - sink).abs()).sum(dim=1)).float()
+                    loss_vec = extra_cost
+            else:
+                # 给每个 1 编秩次（第 k 个 1 的位置）
+                order_pred = (torch.cumsum(p_bin, dim=1) * p_bin).to(torch.int64)  # (B, L)
+                order_true = (torch.cumsum(t_bin, dim=1) * t_bin).to(torch.int64)  # (B, L)
+
+                idx = torch.arange(L, device=device).view(1, L)                    # (1, L)
+                ks  = torch.arange(1, K+1, device=device).view(1, 1, K)            # (1, 1, K)
+
+                mask_pred = (order_pred.unsqueeze(2) == ks)                        # (B, L, K)
+                mask_true = (order_true.unsqueeze(2) == ks)                        # (B, L, K)
+                pos_predK = (mask_pred * idx.unsqueeze(2)).sum(dim=1)              # (B, K)
+                pos_trueK = (mask_true * idx.unsqueeze(2)).sum(dim=1)              # (B, K)
+
+                k_mask = (torch.arange(1, K+1, device=device).view(1, K)
+                          <= n_pairs.view(B, 1))                                   # (B, K)
+
+                pair_cost = ((pos_predK - pos_trueK).abs() * k_mask).sum(dim=1).float()  # (B,)
+
+                # 多余 1 的惩罚
+                if pairing_strategy == "truncate":
+                    extra_cost = torch.zeros(B, device=device, dtype=torch.float32)
+                else:
+                    sink = L if pairing_strategy == "sink_right" else -1
+                    extras_pred = (order_pred > n_pairs.view(B, 1))                # (B, L)
+                    extras_true = (order_true > n_pairs.view(B, 1))                # (B, L)
+                    extra_cost = ((extras_pred * (idx - sink).abs()).sum(dim=1) +
+                                  (extras_true * (idx - sink).abs()).sum(dim=1)).float()
+
+                loss_vec = pair_cost + extra_cost
+
+            # 归一化（pair 用二值计数近似"质量"）
+            if normalization == "per_one":
+                denom = torch.maximum(n_pred_ones, n_true_ones).to(torch.float32).clamp_min(1.0)
+                loss_vec = loss_vec / denom
+            elif normalization == "per_length":
+                loss_vec = loss_vec / float(max(L, 1))
+    else:
+        raise ValueError("mode 必须是 'prefix' 或 'pair'")
+
+    # 聚合
+    if aggregation == "mean":
+        return loss_vec.mean()
+    elif aggregation == "sum":
+        return loss_vec.sum()
+    else:  # "none"
+        return loss_vec

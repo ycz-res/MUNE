@@ -174,31 +174,31 @@ def plot_random_test_samples(test_data: Dict, save_dir: str, max_samples: int = 
         # 计算位置
         true_pos = set(np.where(thr_true_sample > 0)[0].tolist())
         pred_pos = set(np.where(thr_pred_sample > 0)[0].tolist())
-
-            match_pos = sorted(true_pos & pred_pos)
-            true_only_pos = sorted(true_pos - pred_pos)
-            pred_only_pos = sorted(pred_pos - true_pos)
-
+        
+        match_pos = sorted(true_pos & pred_pos)
+        true_only_pos = sorted(true_pos - pred_pos)
+        pred_only_pos = sorted(pred_pos - true_pos)
+        
         # 绘制匹配的阈值 (绿色)
-            for p in match_pos:
+        for p in match_pos:
             ax.axvline(x=p, color='green', linestyle='-', linewidth=1.5, alpha=0.9)
-
+        
         # 绘制真实但未预测的 (蓝色虚线)
-            for p in true_only_pos:
-                ax.axvline(x=p, color='#1f77b4', linestyle='--', linewidth=1.2, alpha=0.9)
-
+        for p in true_only_pos:
+            ax.axvline(x=p, color='#1f77b4', linestyle='--', linewidth=1.2, alpha=0.9)
+        
         # 绘制预测但不真实的 (橙色)
-            for p in pred_only_pos:
-                ax.axvline(x=p, color='orange', linestyle='-', linewidth=1.2, alpha=0.9)
+        for p in pred_only_pos:
+            ax.axvline(x=p, color='orange', linestyle='-', linewidth=1.2, alpha=0.9)
         
         # 计算预测的 MU 数量
         pred_mu = int(np.sum(thr_pred_sample > 0))
         
         ax.set_title(f'Sample {idx} | True MU: {mu_true} | Pred MU: {pred_mu}', 
                     fontsize=9, fontweight='bold')
-            ax.set_xlim(0, 499)
-            ax.set_ylim(0, 1.1)
-            ax.grid(True, alpha=0.2)
+        ax.set_xlim(0, 499)
+        ax.set_ylim(0, 1.1)
+        ax.grid(True, alpha=0.2)
         ax.set_xlabel('Position', fontsize=8)
         ax.set_ylabel('Amplitude', fontsize=8)
     

@@ -1,4 +1,3 @@
-import os
 import argparse
 import numpy as np
 from typing import Dict
@@ -146,6 +145,9 @@ def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary",
     y_norm = normalize_cmap_data(data)
     thr_aligned = map_mu_thresholds(data, mu_thr, threshold_mode)
 
+    # 计算mus：从thresholds中统计1的数量
+    mus_count = np.sum(thr_aligned, axis=1)  # (N,) 每个样本的阈值位置数量
+    
     # 保存数据
     # 确保输出目录存在
     output_dir = os.path.dirname(output_path)
@@ -154,7 +156,8 @@ def preprocess(mat_path: str, output_path: str, threshold_mode: str = "binary",
     np.savez_compressed(
         output_path,
         cmap=y_norm.astype(np.float32),
-        mus=label_num.astype(np.float32),
+        label_num=label_num.astype(np.float32),  # 原始MU数量标签
+        mus=mus_count.astype(np.float32),  # 从thresholds统计的实际阈值位置数量
         thresholds=thr_aligned.astype(np.float32),
     )
 
@@ -165,7 +168,7 @@ def main():
     parser = argparse.ArgumentParser(description="预处理仿真数据，生成可快速加载的 .npz 文件")
     parser.add_argument("--mat", default="./data.mat", help="源 .mat 路径（默认: ./data.mat）")
     parser.add_argument("--mode", default="binary", choices=["binary", "value"], help="阈值映射模式")
-    parser.add_argument("--out", default="./data.npz", help="输出文件路径 (默认: ./data.npz)")
+    parser.add_argument("--out", default="./data_all.npz", help="输出文件路径 (默认: ./data.npz)")
     parser.add_argument("--start", type=float, default=0.0, help="起始位置比例，范围 [0, 1)，默认 0.0 表示从头开始")
     parser.add_argument("--end", type=float, default=1.0, help="结束位置比例，范围 (0, 1]，默认 1.0 表示到末尾")
     args = parser.parse_args()

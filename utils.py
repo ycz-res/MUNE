@@ -6,10 +6,9 @@
 import torch
 import os
 import random
-from typing import Dict
+from typing import Dict, Tuple
 import numpy as np
-import scipy.io
-import h5py
+from sklearn.model_selection import StratifiedKFold
 
 def set_seed(seed: int) -> None:
     """设置随机种子"""
@@ -20,18 +19,67 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = False
 
-def load_mat_data(file_path: str, lazy: bool = True, start_ratio: float = 0.0, end_ratio: float = 1.0):
+def stratified_shuffle_data(data_dict: Dict, random_state: int = 57) -> Tuple[np.ndarray, np.ndarray]:
     """
-    安全加载大型 .mat 文件（支持 v7.3）
+    使用StratifiedKFold对数据进行分层洗牌，保持标签分布
+    
+    Args:
+        data_dict: 包含'data', 'label_num', 'muThr'的数据字典
+        random_state: 随机种子，确保结果可重现
+        
+    Returns:
+        Tuple[np.ndarray, np.ndarray]: (shuffled_indices, stratified_labels)
+            - shuffled_indices: 洗牌后的索引数组
+            - stratified_labels: 对应的标签数组（用于验证分层效果）
+    """
+    # 提取标签数据
+    if 'mus' in data_dict:
+        labels = np.array(data_dict['mus']).flatten()
+    else:
+        raise ValueError("数据字典中缺少'mus'键")
+    
+    # 获取总样本数
+    total_samples = len(labels)
+    
+    # 使用StratifiedKFold进行分层洗牌
+    # 这里我们使用一个大的fold数来近似随机洗牌，同时保持分层
+    n_folds = min(10, total_samples // 2)  # 确保每个fold至少有2个样本
+    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=random_state)
+    
+    # 生成分层索引
+    shuffled_indices = []
+    for train_idx, val_idx in skf.split(np.arange(total_samples), labels):
+        shuffled_indices.extend(train_idx.tolist())
+        shuffled_indices.extend(val_idx.tolist())
+    
+    # 转换为numpy数组
+    shuffled_indices = np.array(shuffled_indices)
+    
+    # 验证分层效果
+    stratified_labels = labels[shuffled_indices]
+    
+    print(f"🔄 StratifiedKFold洗牌完成:")
+    print(f"  📊 总样本数: {total_samples}")
+    print(f"  🎯 使用fold数: {n_folds}")
+    print(f"  📈 原始标签分布: {np.bincount(labels.astype(int))}")
+    print(f"  📈 洗牌后标签分布: {np.bincount(stratified_labels.astype(int))}")
+    
+    return shuffled_indices, stratified_labels
+
+def load_data(file_path: str, start_ratio: float = 0.0, end_ratio: float = 1.0, 
+              shuffle: bool = True, random_state: int = 57):
+    """
+    加载预处理后的 .npz 文件，支持数据范围选择和StratifiedKFold洗牌
 
     Args:
-        file_path (str): .mat 文件路径
-        lazy (bool): 是否采用懒加载（True 推荐，用于大文件）
+        file_path (str): .npz 文件路径
         start_ratio (float): 起始位置比例，范围 [0, 1)，默认 0.0 表示从头开始
         end_ratio (float): 结束位置比例，范围 (0, 1]，默认 1.0 表示到末尾
+        shuffle (bool): 是否使用StratifiedKFold进行分层洗牌，默认True
+        random_state (int): 随机种子，确保结果可重现，默认57
 
     Returns:
-        dict[str, np.ndarray or h5py.Dataset]: 键名→数据
+        dict[str, np.ndarray]: 包含 'cmap', 'mus', 'thresholds' 的数据字典
     """
     if not (0.0 <= start_ratio < 1.0):
         raise ValueError("start_ratio 必须在 [0, 1) 范围内")
@@ -40,84 +88,57 @@ def load_mat_data(file_path: str, lazy: bool = True, start_ratio: float = 0.0, e
     if start_ratio >= end_ratio:
         raise ValueError("start_ratio 必须小于 end_ratio")
     
-    try:
-        # ① 优先尝试常规 .mat（适合 <2GB）
-        mat_data = scipy.io.loadmat(file_path)
-        filtered_data = {
-            k: v for k, v in mat_data.items()
-            if not k.startswith('__') and isinstance(v, np.ndarray)
-        }
-        if filtered_data:
-            print(f"✅ 使用 scipy.io.loadmat() 成功加载: {file_path}")
-            return filtered_data
-
-    except Exception as e:
-        # ② 若文件为 v7.3（基于 HDF5），改用 h5py
-        if "HDF" in str(e) or "mat file appears to be HDF5" in str(e):
-            print(f"🔍 检测到大型 v7.3 文件，使用 h5py 加载: {file_path}")
-        else:
-            print(f"⚠️ loadmat 失败，自动尝试 h5py: {e}")
-
-    # === 使用 h5py 读取 v7.3 格式 ===
-    data_dict = {}
-    f = h5py.File(file_path, 'r')  # 仅打开，不读入全部内存
-
-    for key in f.keys():
-        try:
-            # 获取原始shape
-            original_shape = f[key].shape
-            
-            # 判断样本数在哪个维度（通常是最大的那个维度）
-            if key in ['data', 'label_num', 'muThr']:
-                # 对于这些关键数据，样本数通常在最后一维
-                total_samples = original_shape[-1]
-                start_idx = int(total_samples * start_ratio)
-                end_idx = int(total_samples * end_ratio)
-                
-                if start_ratio > 0 or end_ratio < 1.0:
-                    # 只加载指定范围的数据
-                    if key == 'data':  # 只在第一次打印
-                        ratio = end_ratio - start_ratio
-                        print(f"  📊 数据范围: 从 {start_idx:,} 到 {end_idx:,}（共 {end_idx - start_idx:,} 个样本，占总数 {total_samples:,} 的 {ratio*100:.1f}%）")
-                    
-                    if lazy:
-                        # 懒加载：h5py支持切片，按最后一维切片
-                        data_dict[key] = f[key][..., start_idx:end_idx]
-                        print(f"  🔹 懒加载变量: {key}, shape={data_dict[key].shape}")
-                    else:
-                        # 全量加载指定范围：直接读为 numpy 数组，按最后一维切片
-                        data_dict[key] = np.array(f[key][..., start_idx:end_idx])
-                        print(f"  ✅ 已加载变量: {key}, shape={data_dict[key].shape}")
-                else:
-                    # 加载全部数据
-                    if lazy:
-                        data_dict[key] = f[key]
-                        print(f"  🔹 懒加载变量: {key}, shape={f[key].shape}")
-                    else:
-                        data_dict[key] = np.array(f[key])
-                        print(f"  ✅ 已加载变量: {key}, shape={data_dict[key].shape}")
-            else:
-                # 其他变量直接加载
-                if lazy:
-                    data_dict[key] = f[key]
-                    print(f"  🔹 懒加载变量: {key}, shape={f[key].shape}")
-                else:
-                    data_dict[key] = np.array(f[key])
-                    print(f"  ✅ 已加载变量: {key}, shape={data_dict[key].shape}")
-        except Exception as e2:
-            print(f"  ⚠️ 无法加载 {key}: {e2}")
-
-    if not data_dict:
-        raise ValueError(f"❌ 未能在 {file_path} 中加载有效变量")
-
-    # 处理数据翻转：将data的最后一维从[x,y]翻转为[y,x]
-    if 'data' in data_dict:
-        if lazy and isinstance(data_dict['data'], h5py.Dataset):
-            # 懒加载模式下，需要先转换为numpy数组才能翻转
-            data_dict['data'] = np.array(data_dict['data'])
-        data_dict['data'] = np.flip(data_dict['data'], axis=1)
-        print(f"  🔄 已翻转data数据的最后一维")
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"未找到文件: {file_path}")
     
-    print(f"✅ 成功加载 {len(data_dict)} 个变量（{'lazy' if lazy else 'eager'} 模式）")
+    print(f"📦 加载预处理文件: {file_path}")
+    
+    # 加载npz文件
+    npz = np.load(file_path, allow_pickle=True)
+    
+    # 提取所需的数据
+    cmap = np.array(npz["cmap"]).astype(np.float32)
+    mus = np.array(npz["mus"]).astype(np.float32)
+    thresholds = np.array(npz["thresholds"]).astype(np.float32)
+    
+    print(f"✅ 原始数据加载完成: cmap={cmap.shape}, mus={mus.shape}, thresholds={thresholds.shape}")
+    
+    # 计算数据范围
+    total_samples = cmap.shape[0]
+    start_idx = int(total_samples * start_ratio)
+    end_idx = int(total_samples * end_ratio)
+    
+    if start_ratio > 0 or end_ratio < 1.0:
+        ratio = end_ratio - start_ratio
+        print(f"📊 数据范围: 从 {start_idx:,} 到 {end_idx:,}（共 {end_idx - start_idx:,} 个样本，占总数 {total_samples:,} 的 {ratio*100:.1f}%）")
+        
+        # 切片数据
+        cmap = cmap[start_idx:end_idx]
+        mus = mus[start_idx:end_idx]
+        thresholds = thresholds[start_idx:end_idx]
+    
+    # 构建数据字典
+    data_dict = {
+        "cmap": cmap,
+        "mus": mus,
+        "thresholds": thresholds
+    }
+    
+    # 应用StratifiedKFold洗牌
+    if shuffle:
+        print(f"🔄 开始StratifiedKFold洗牌 (random_state={random_state})...")
+        
+        # 使用mus作为标签进行分层洗牌
+        shuffled_indices, _ = stratified_shuffle_data(data_dict, random_state)
+        
+        # 使用洗牌后的索引重新排列数据
+        data_dict["cmap"] = data_dict["cmap"][shuffled_indices]
+        data_dict["mus"] = data_dict["mus"][shuffled_indices]
+        data_dict["thresholds"] = data_dict["thresholds"][shuffled_indices]
+        
+        print(f"✅ 数据洗牌完成，保持标签分布")
+    
+    print(f"✅ 最终数据形状: cmap={data_dict['cmap'].shape}, mus={data_dict['mus'].shape}, thresholds={data_dict['thresholds'].shape}")
     return data_dict
 
