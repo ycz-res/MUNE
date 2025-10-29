@@ -19,7 +19,7 @@ warnings.filterwarnings('ignore', message='.*NVML.*')
 from dataset import Sim
 from config import get_config
 from model import Linear, CNN, LSTM
-from loss import ce, focal_ce, thr
+from loss import ce, focal_ce, thr, emd
 from utils import set_seed
 from metrics import b_v_metrics
 import json

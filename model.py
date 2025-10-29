@@ -73,7 +73,7 @@ class LSTM(nn.Module):
     输出:
         logits: (batch_size, 500)
     """
-    def __init__(self, d_model: int = 128, num_layers: int = 8, bidirectional: bool = True):
+    def __init__(self, d_model: int = 64, num_layers: int = 2, bidirectional: bool = True):
         super().__init__()
         
         self.hidden_dim = d_model

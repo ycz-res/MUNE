@@ -66,6 +66,9 @@ def stratified_shuffle_data(data_dict: Dict, random_state: int = 57) -> Tuple[np
     
     return shuffled_indices, stratified_labels
 
+# 全局缓存变量
+_data_cache = {}
+
 def load_data(file_path: str, start_ratio: float = 0.0, end_ratio: float = 1.0, 
               shuffle: bool = True, random_state: int = 57):
     """
@@ -92,17 +95,34 @@ def load_data(file_path: str, start_ratio: float = 0.0, end_ratio: float = 1.0,
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"未找到文件: {file_path}")
     
-    print(f"📦 加载预处理文件: {file_path}")
+    # 使用缓存避免重复加载
+    global _data_cache
+    cache_key = file_path
     
-    # 加载npz文件
-    npz = np.load(file_path, allow_pickle=True)
-    
-    # 提取所需的数据
-    cmap = np.array(npz["cmap"]).astype(np.float32)
-    mus = np.array(npz["mus"]).astype(np.float32)
-    thresholds = np.array(npz["thresholds"]).astype(np.float32)
-    
-    print(f"✅ 原始数据加载完成: cmap={cmap.shape}, mus={mus.shape}, thresholds={thresholds.shape}")
+    if cache_key not in _data_cache:
+        print(f"📦 加载预处理文件: {file_path}")
+        
+        # 加载npz文件
+        npz = np.load(file_path, allow_pickle=True)
+        
+        # 提取所需的数据
+        cmap = np.array(npz["cmap"]).astype(np.float32)
+        mus = np.array(npz["mus"]).astype(np.float32)
+        thresholds = np.array(npz["thresholds"]).astype(np.float32)
+        
+        # 缓存数据
+        _data_cache[cache_key] = {
+            'cmap': cmap,
+            'mus': mus,
+            'thresholds': thresholds
+        }
+        
+        print(f"✅ 原始数据加载完成: cmap={cmap.shape}, mus={mus.shape}, thresholds={thresholds.shape}")
+    else:
+        print(f"📦 使用缓存数据: {file_path}")
+        cmap = _data_cache[cache_key]['cmap']
+        mus = _data_cache[cache_key]['mus']
+        thresholds = _data_cache[cache_key]['thresholds']
     
     # 计算数据范围
     total_samples = cmap.shape[0]
