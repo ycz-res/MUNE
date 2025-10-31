@@ -27,15 +27,14 @@ import json
 
 def get_args_parser():
     a_parser = argparse.ArgumentParser('MU Threshold Prediction Training', add_help=False)
-    a_parser.add_argument('--batch_size', default=4, type=int, help='Batch size for training')
+    a_parser.add_argument('--batch_size', default=32, type=int, help='Batch size for training')
     a_parser.add_argument('--epochs', default=10, type=int, help='Number of training epochs')
-    a_parser.add_argument('--shuffle', default=False, type=bool, help='Shuffle training data')
-    a_parser.add_argument('--num_workers', default=0, type=int, help='Number of data loading workers')
-    a_parser.add_argument('--pin_memory', default=False, type=bool, help='Pin memory for data loading')
+    a_parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers')
+    a_parser.add_argument('--pin_memory', default=True, type=bool, help='Pin memory for data loading')
     a_parser.add_argument('--device', default='cuda', type=str, help='Device to use (cpu/cuda)')
     a_parser.add_argument('--lr', default=1e-4, type=float, help='Learning rate')
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay')
-    a_parser.add_argument('--patience', default=5000, type=int, help='Early stopping patience')
+    a_parser.add_argument('--patience', default=20, type=int, help='Early stopping patience')
     a_parser.add_argument('--loss_type', default='emd', choices=['thr', 'focal', 'ce', 'emd'], help='Loss function type: thr=threshold loss, focal=focal loss, ce=cross entropy, emd=earth mover\'s distance')
     a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
     a_parser.add_argument('--save_best', default=True, type=bool, help='Save best model')
@@ -65,16 +64,16 @@ def main(args):
     train_dataset = Dataset(config['SimDataset.data'], args.dataset_type, start_percent=0.0, end_percent=0.9, stage='train', threshold_mode=args.threshold_mode)
     val_dataset = Dataset(config['SimDataset.data'], args.dataset_type, start_percent=0.9, end_percent=0.95, stage='val', threshold_mode=args.threshold_mode)
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, 
                              collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 
                              pin_memory=args.pin_memory)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=args.shuffle, 
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, 
                            collate_fn=Dataset.collate_fn, num_workers=args.num_workers, 
                            pin_memory=args.pin_memory)
 
 
     # 初始化训练组件
-    model = eval(args.model_type)(d_model=128).to(args.device)
+    model = eval(args.model_type)(d_model=64).to(args.device)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr, betas=(0.9, 0.95), weight_decay=args.weight_decay)
     
     # 创建损失函数（支持加权）
