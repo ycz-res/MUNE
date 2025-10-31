@@ -342,48 +342,45 @@ def plot_comprehensive_summary(train_data: Dict, test_data: Dict, save_dir: str)
     print(f"✅ 保存综合报告: {out_path}")
 
 
-def generate_all_plots(timestamp: str = None, train_json: str = None, test_json: Optional[str] = None, 
-                      save_dir: str = './visual_res', max_samples: int = 20):
+def generate_all_plots(timestamp: str, result_dir: str = 'result', max_samples: int = 20):
     """
     从JSON数据生成所有可视化图表
         
         Args:
         timestamp: 时间戳，自动查找对应的训练和测试数据
-        train_json: 训练数据JSON路径（如果提供timestamp则忽略）
-        test_json: 测试数据JSON路径（可选，如果提供timestamp则忽略）
-        save_dir: 保存目录
+        result_dir: result根目录，保存目录自动设置为result/{timestamp}/visual/
         max_samples: 最大样本可视化数量
     """
-    # 创建保存目录
-    os.makedirs(save_dir, exist_ok=True)
-    
     print("=" * 60)
     print("📊 生成可视化图表")
     print("=" * 60)
     
-    # 如果提供了时间戳，自动组装路径
-    if timestamp:
-        curve_data_dir = 'plot/curve_data'
-        train_json = os.path.join(curve_data_dir, f'train_{timestamp}.json')
-        test_json = os.path.join(curve_data_dir, f'test_{timestamp}.json')
-        print(f"\n🕐 使用时间戳: {timestamp}")
-        
-        # 检查文件是否存在
-        if not os.path.exists(train_json):
-            raise FileNotFoundError(f"未找到训练数据: {train_json}")
-        if not os.path.exists(test_json):
-            print(f"⚠️  未找到测试数据: {test_json}，仅使用训练数据生成可视化")
-            test_json = None
+    # 组装路径
+    result_timestamp_dir = os.path.join(result_dir, timestamp)
+    train_json = os.path.join(result_timestamp_dir, f'train_{timestamp}.json')
+    test_json = os.path.join(result_timestamp_dir, f'test_{timestamp}.json')
+    save_dir = os.path.join(result_timestamp_dir, 'visual')
+    
+    print(f"\n🕐 使用时间戳: {timestamp}")
+    
+    # 检查文件是否存在
+    if not os.path.exists(train_json):
+        raise FileNotFoundError(f"未找到训练数据: {train_json}")
+    
+    # 创建保存目录
+    os.makedirs(save_dir, exist_ok=True)
     
     # 加载训练数据
     print(f"\n📂 加载训练数据: {train_json}")
     train_data = load_train_data(train_json)
     
-    # 加载测试数据（如果提供）
+    # 加载测试数据（如果存在）
     test_data = None
-    if test_json:
+    if os.path.exists(test_json):
         print(f"📂 加载测试数据: {test_json}")
         test_data = load_test_data(test_json)
+    else:
+        print(f"⚠️  未找到测试数据: {test_json}，仅使用训练数据生成可视化")
     
     print(f"\n💾 保存目录: {save_dir}\n")
     
@@ -397,24 +394,19 @@ def generate_all_plots(timestamp: str = None, train_json: str = None, test_json:
     
     print("\n" + "=" * 60)
     print("✅ 所有可视化图表生成完成！")
+    print(f"📁 保存目录: {save_dir}")
     print("=" * 60)
 
 
 def main():
     parser = argparse.ArgumentParser('Generate visualizations from JSON data')
-    parser.add_argument('--timestamp', type=str, default=None, help='Model timestamp (e.g., 20251023_123456). Auto-find train and test JSON files.')
-    parser.add_argument('--train_json', type=str, default=None, help='Path to train JSON file (ignored if timestamp is provided)')
-    parser.add_argument('--test_json', type=str, default=None, help='Path to test JSON file (optional, ignored if timestamp is provided)')
-    parser.add_argument('--save_dir', type=str, default='plot/visual_res', help='Directory to save visualizations')
+    parser.add_argument('--timestamp', type=str, required=True, help='Model timestamp (e.g., 20251023_123456). Auto-find train and test JSON files from result/{timestamp}/')
+    parser.add_argument('--result_dir', type=str, default='result', help='Root directory containing experiment results (save dir auto-set to result/{timestamp}/visual/)')
     parser.add_argument('--max_samples', type=int, default=20, help='Maximum number of test samples to visualize')
     
     args = parser.parse_args()
     
-    # 检查参数
-    if args.timestamp is None and args.train_json is None:
-        parser.error("必须提供 --timestamp 或 --train_json 参数之一")
-    
-    generate_all_plots(args.timestamp, args.train_json, args.test_json, args.save_dir, args.max_samples)
+    generate_all_plots(args.timestamp, args.result_dir, args.max_samples)
 
 
 if __name__ == '__main__':

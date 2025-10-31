@@ -167,7 +167,8 @@ def emd(
         loss_vec = flow.sum(dim=1)                                      # (B,)
 
         if normalization == "per_one":
-            denom = torch.maximum(p.sum(dim=1), t.sum(dim=1)).clamp_min(1e-8)
+            # denom = torch.maximum(p.sum(dim=1), t.sum(dim=1)).clamp_min(1e-8)
+            denom = torch.clamp(t.sum(dim=1), min=1e-8)
             loss_vec = loss_vec / denom
         elif normalization == "per_length":
             loss_vec = loss_vec / float(max(L, 1))

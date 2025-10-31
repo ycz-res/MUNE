@@ -137,10 +137,8 @@ def b_v_metrics(pred_logits: torch.Tensor,
     # 3️⃣ 综合指标（可用于 early stopping 选择最佳 epoch）
     # ============================================================
     if mode == "binary":
-        # 简化评分策略：主要关注F1和IoU
-        metrics["Score"] = 0.6 * metrics["F1"] + 0.4 * metrics["IoU"]
-    else:
-        # 位置与数值共同评分（MAE 越小越好，取反）
-        metrics["Score"] = 0.4 * metrics["F1"] + 0.4 * metrics["IoU"] + 0.2 * (1 - metrics["MAE"])
+        # 综合评分策略：F1、IoU和EMD（EMD已转换为越大越好）
+        metrics["Score"] = 0.4 * metrics["F1"] + 0.4 * metrics["IoU"] + 0.2 * metrics["EMD"]
+
 
     return metrics

@@ -127,3 +127,6 @@ logs/
 # Checkpoints
 checkpoints/
 
+# Experiment results
+result/
+

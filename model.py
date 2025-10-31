@@ -16,14 +16,16 @@ class Linear(nn.Module):
             - 训练阶段: 直接给 BCEWithLogitsLoss 或 FocalLoss
             - 推理阶段: 由外部脚本控制 sigmoid / 可视化
     """
-    def __init__(self, d_model: int = 128):
+    def __init__(self, d_model: int = 128, dropout: float = 0.1):
         super().__init__()
         
         self.encoder = nn.Sequential(
             nn.Linear(500, d_model),
             nn.ReLU(),
+            nn.Dropout(dropout),
             nn.Linear(d_model, d_model),
             nn.ReLU(),
+            nn.Dropout(dropout),
         )
 
         self.threshold_head = nn.Linear(d_model, 500)
@@ -41,17 +43,19 @@ class CNN(nn.Module):
     输出:
         logits: (batch_size, 500)
     """
-    def __init__(self, d_model: int = 64):
+    def __init__(self, d_model: int = 64, dropout: float = 0.1):
         super().__init__()
         
         self.conv_net = nn.Sequential(
             nn.Conv1d(1, 32, kernel_size=5, padding=2),  # [B, 1, 500] → [B, 32, 500]
             nn.BatchNorm1d(32),
             nn.ReLU(),
+            nn.Dropout(dropout),
 
             nn.Conv1d(32, 64, kernel_size=5, padding=2), # [B, 32, 500] → [B, 64, 500]
             nn.BatchNorm1d(64),
             nn.ReLU(),
+            nn.Dropout(dropout),
 
             nn.Conv1d(64, d_model, kernel_size=3, padding=1), # [B, 64, 500] → [B, d_model, 500]
             nn.ReLU()
@@ -73,7 +77,7 @@ class LSTM(nn.Module):
     输出:
         logits: (batch_size, 500)
     """
-    def __init__(self, d_model: int = 64, num_layers: int = 2, bidirectional: bool = True):
+    def __init__(self, d_model: int = 64, num_layers: int = 2, bidirectional: bool = True, dropout: float = 0.1):
         super().__init__()
         
         self.hidden_dim = d_model
@@ -85,7 +89,11 @@ class LSTM(nn.Module):
             num_layers=num_layers,
             batch_first=True,
             bidirectional=bidirectional,
+            dropout=dropout if num_layers > 1 else 0,  # LSTM的dropout只在多层时生效
         )
+        
+        # 添加额外的dropout层
+        self.dropout = nn.Dropout(dropout)
 
         self.fc = nn.Linear(d_model * self.num_directions, 1)  # 每个时间步输出1个logit
         
@@ -96,5 +104,6 @@ class LSTM(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = x.unsqueeze(-1)  # [B, 500] → [B, 500, 1]
         lstm_out, _ = self.lstm(x)  # [B, 500, d_model * num_directions]
+        lstm_out = self.dropout(lstm_out)  # 应用dropout
         logits = self.fc(lstm_out).squeeze(-1)  # [B, 500]
         return logits
