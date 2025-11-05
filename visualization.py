@@ -60,9 +60,9 @@ def plot_val_metrics_curves(train_data: Dict, save_dir: str):
     history = train_data['training_history']
     epochs = [h['epoch'] for h in history]
     
-    metrics_names = ['Precision', 'Recall', 'F1', 'IoU', 'Score']
-    colors = ['#1f77b4', '#2ca02c', '#d62728', '#9467bd', '#ff7f0e']
-    markers = ['o', 's', '^', 'D', 'v']
+    metrics_names = ['Precision', 'Recall', 'F1', 'IoU', 'EMD', 'Score']
+    colors = ['#1f77b4', '#2ca02c', '#d62728', '#9467bd', '#edc948', '#ff7f0e']
+    markers = ['o', 's', '^', 'D', 'v', 'p']
     
     plt.figure(figsize=(12, 6))
     
@@ -272,8 +272,8 @@ def plot_comprehensive_summary(train_data: Dict, test_data: Dict, save_dir: str)
     
     # 3. 验证指标曲线
     ax3 = fig.add_subplot(gs[1, :])
-    metrics_names = ['Precision', 'Recall', 'F1', 'IoU', 'Score']
-    colors = ['#1f77b4', '#2ca02c', '#d62728', '#9467bd', '#ff7f0e']
+    metrics_names = ['Precision', 'Recall', 'F1', 'IoU', 'EMD', 'Score']
+    colors = ['#1f77b4', '#2ca02c', '#d62728', '#9467bd', '#edc948', '#ff7f0e']
     
     for metric, color in zip(metrics_names, colors):
         values = [h['val_metrics'].get(metric, 0.0) for h in history]
@@ -325,6 +325,7 @@ def plot_comprehensive_summary(train_data: Dict, test_data: Dict, save_dir: str)
 • Recall: {test_metrics['Recall']:.4f}
 • F1 Score: {test_metrics['F1']:.4f}
 • IoU: {test_metrics['IoU']:.4f}
+• EMD: {test_metrics.get('EMD', 0.0):.4f}
 • Score: {test_metrics['Score']:.4f}
 
 测试样本数: {test_data.get('num_samples', 'N/A')}

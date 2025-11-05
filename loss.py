@@ -133,13 +133,15 @@ AggregationT = Literal["none", "mean", "sum"]
 ModeT = Literal["prefix", "pair"]
 
 def emd(
-    predictions: torch.Tensor,      # (batch_size, L) 预测 0/1 序列
+    predictions: torch.Tensor,      # (batch_size, L) 预测 logits 或 0/1 序列
     targets: torch.Tensor,          # (batch_size, L) 真实 0/1 序列
     *,
     mode: ModeT = "prefix",                 # "prefix" 可导（训练） | "pair" 不可导（评估）
     normalization: NormalizeT = "per_one",  # "none" | "per_one" | "per_length"
     pairing_strategy: PairingStrategyT = "truncate",  # 仅 pair 用
     aggregation: AggregationT = "mean",     # "none" | "mean" | "sum"
+    use_probability: bool = True,           # True: 使用sigmoid概率（软EMD），False: 二值化（硬EMD）
+    scale_factor: float = 1.0,               # 损失缩放因子，用于调整损失大小
 ) -> torch.Tensor:
     """
     统一版 EMD（A/B 同长，元素为 0/1；L 自适应）：
@@ -150,6 +152,10 @@ def emd(
       - "none"       ：原始搬运量
       - "per_one"    ：/ max(#1_pred, #1_true) —— "每目标平均位移"
       - "per_length" ：/ L —— "单位长度搬运密度"（L=序列长度）
+    
+    use_probability:
+      - True: 使用sigmoid概率值（软EMD，更适合训练）
+      - False: 使用二值化结果（硬EMD，更接近传统EMD）
     """
     # 基本校验
     assert predictions.dim() == 2 and targets.dim() == 2, "predictions/targets 需为 (B, L)"
@@ -157,9 +163,23 @@ def emd(
     B, L = predictions.shape
     device = predictions.device
 
-    # 转 float 运算（输入应为 0/1）
-    p = predictions.to(torch.float32)  # (B, L)
-    t = targets.to(torch.float32)      # (B, L)
+    # 处理预测值：如果是logits，转换为概率或二值化
+    p_raw = predictions.to(torch.float32)  # (B, L)
+    t = targets.to(torch.float32)          # (B, L)
+    
+    # 检测输入是否为logits（值超出0-1范围）
+    is_logits = p_raw.abs().max() > 1.5  # 如果绝对值大于1.5，可能是logits
+    
+    if is_logits:
+        if use_probability:
+            # 使用sigmoid概率（软EMD，可导，适合训练）
+            p = torch.sigmoid(p_raw)  # (B, L) 范围 [0, 1]
+        else:
+            # 二值化（硬EMD，更接近传统EMD）
+            p = (torch.sigmoid(p_raw) > 0.5).float()  # (B, L) 范围 {0, 1}
+    else:
+        # 输入已经是0-1范围，直接使用
+        p = p_raw.clamp(0, 1)  # 确保在[0,1]范围内
 
     if mode == "prefix":
         # —— 可导：EMD = Σ |cumsum(p) - cumsum(t)| —— #
@@ -167,16 +187,32 @@ def emd(
         loss_vec = flow.sum(dim=1)                                      # (B,)
 
         if normalization == "per_one":
-            # denom = torch.maximum(p.sum(dim=1), t.sum(dim=1)).clamp_min(1e-8)
-            denom = torch.clamp(t.sum(dim=1), min=1e-8)
-            loss_vec = loss_vec / denom
+            # 对于概率模式，使用更合理的归一化
+            if use_probability and is_logits:
+                # 使用序列长度归一化，使损失值在合理范围（0-1之间，再乘以序列长度）
+                # 这样损失值大约在0-500范围，归一化后约0-10
+                loss_vec = loss_vec / float(max(L, 1))
+            else:
+                # 二值化模式，使用传统归一化
+                denom = torch.maximum(p.sum(dim=1), t.sum(dim=1)).clamp_min(1.0)
+                loss_vec = loss_vec / denom
         elif normalization == "per_length":
             loss_vec = loss_vec / float(max(L, 1))
+        
+        # 对于概率模式，添加额外的缩放使损失值更合理（通常在0-5范围内）
+        if use_probability and is_logits:
+            # 概率模式的损失值通常较大，进一步缩放
+            # 归一化后通常范围在0-100，缩放0.05倍使损失值在0-5范围（与CE损失相当）
+            loss_vec = loss_vec * 0.05
 
     elif mode == "pair":
         # —— 不可导：配对法（批量向量化，无 Python for） —— #
         with torch.no_grad():
-            p_bin = predictions.to(torch.long)  # 已是 0/1
+            # 对于pair模式，需要二值化输入
+            if is_logits or use_probability:
+                p_bin = (p > 0.5).long()  # 二值化
+            else:
+                p_bin = p.to(torch.long)  # 已是 0/1
             t_bin = targets.to(torch.long)
 
             n_pred_ones = p_bin.sum(dim=1)                  # (B,)
@@ -234,8 +270,12 @@ def emd(
 
     # 聚合
     if aggregation == "mean":
-        return loss_vec.mean()
+        final_loss = loss_vec.mean()
     elif aggregation == "sum":
-        return loss_vec.sum()
+        final_loss = loss_vec.sum()
     else:  # "none"
-        return loss_vec
+        final_loss = loss_vec
+    
+    # 应用缩放因子，使损失值在合理范围内（通常0-10）
+    # 默认scale_factor=1.0表示不缩放，可以根据需要调整
+    return final_loss * scale_factor
