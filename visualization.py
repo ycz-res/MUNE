@@ -10,6 +10,7 @@ import numpy as np
 import argparse
 from typing import Dict, List, Optional
 import warnings
+import torch
 
 # 屏蔽中文字体警告
 warnings.filterwarnings('ignore', category=UserWarning, message='.*Glyph.*missing from font.*')
@@ -30,6 +31,90 @@ def load_test_data(test_json_path: str) -> Dict:
     """加载测试数据"""
     with open(test_json_path, 'r', encoding='utf-8') as f:
         return json.load(f)
+
+
+def plot_single_sample(src, thresholds_pred, thresholds_true, save_path, epoch=None, sample_idx=0):
+    """
+    绘制单个训练样本的可视化图
+    
+    Args:
+        src: 输入数据字典，包含 'cmap' 键
+        thresholds_pred: 预测的阈值 (tensor, shape: [batch_size, seq_len])
+        thresholds_true: 真实的阈值 (tensor, shape: [batch_size, seq_len])
+        save_path: 保存路径
+        epoch: epoch编号（可选，用于标题）
+        sample_idx: 要可视化的样本索引（默认0，即第一个样本）
+    """
+    # 提取第一个样本
+    cmap = src["cmap"][sample_idx].detach().cpu().numpy() if torch.is_tensor(src["cmap"]) else src["cmap"][sample_idx]
+    thresholds_pred_sample = thresholds_pred[sample_idx].detach().cpu() if torch.is_tensor(thresholds_pred) else thresholds_pred[sample_idx]
+    thresholds_true_sample = thresholds_true[sample_idx].detach().cpu() if torch.is_tensor(thresholds_true) else thresholds_true[sample_idx]
+    
+    # 转换为numpy数组
+    if torch.is_tensor(thresholds_pred_sample):
+        thresholds_pred_sample = thresholds_pred_sample.numpy()
+    if torch.is_tensor(thresholds_true_sample):
+        thresholds_true_sample = thresholds_true_sample.numpy()
+    
+    # 计算MU数量
+    mu_true = int(thresholds_true_sample.sum())
+    mu_pred = int((torch.sigmoid(torch.from_numpy(thresholds_pred_sample)) > 0.5).sum() if isinstance(thresholds_pred_sample, np.ndarray) else (thresholds_pred_sample > 0.5).sum())
+    
+    # 创建图形
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    x_positions = np.arange(len(cmap))
+    
+    # 绘制 CMAP (散点图)
+    ax.scatter(x_positions, cmap, c='blue', s=1, alpha=0.3, label='CMAP')
+    
+    # 计算位置
+    true_pos = set(np.where(thresholds_true_sample > 0)[0].tolist())
+    # 处理预测阈值：如果是numpy数组，转换为tensor再sigmoid；如果已经是tensor，直接sigmoid
+    if isinstance(thresholds_pred_sample, np.ndarray):
+        pred_binary = (torch.sigmoid(torch.from_numpy(thresholds_pred_sample)) > 0.5).numpy()
+    else:
+        pred_binary = (torch.sigmoid(thresholds_pred_sample) > 0.5).numpy() if torch.is_tensor(thresholds_pred_sample) else (thresholds_pred_sample > 0.5)
+    pred_pos = set(np.where(pred_binary)[0].tolist())
+    
+    match_pos = sorted(true_pos & pred_pos)
+    true_only_pos = sorted(true_pos - pred_pos)
+    pred_only_pos = sorted(pred_pos - true_pos)
+    
+    # 绘制匹配的阈值 (绿色)
+    for p in match_pos:
+        ax.axvline(x=p, color='green', linestyle='-', linewidth=1.5, alpha=0.9)
+    
+    # 绘制真实但未预测的 (蓝色虚线)
+    for p in true_only_pos:
+        ax.axvline(x=p, color='#1f77b4', linestyle='--', linewidth=1.2, alpha=0.9)
+    
+    # 绘制预测但不真实的 (橙色)
+    for p in pred_only_pos:
+        ax.axvline(x=p, color='orange', linestyle='-', linewidth=1.2, alpha=0.9)
+    
+    # 设置标题
+    title = f'Epoch {epoch} Training Sample | True MU: {mu_true} | Pred MU: {mu_pred}' if epoch else f'Sample {sample_idx} | True MU: {mu_true} | Pred MU: {mu_pred}'
+    ax.set_title(title, fontsize=12, fontweight='bold')
+    
+    ax.set_xlim(0, len(cmap) - 1)
+    ax.set_ylim(0, 1.1)
+    ax.grid(True, alpha=0.2)
+    ax.set_xlabel('Position', fontsize=10)
+    ax.set_ylabel('Amplitude', fontsize=10)
+    
+    # 添加图例
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='green', label='Match (True & Pred)'),
+        Patch(facecolor='#1f77b4', label='True Only (Miss)'),
+        Patch(facecolor='orange', label='Pred Only (False Alarm)')
+    ]
+    ax.legend(handles=legend_elements, loc='upper right', fontsize=9)
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
 
 def plot_loss_curves(train_data: Dict, save_dir: str):

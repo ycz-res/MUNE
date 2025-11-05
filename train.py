@@ -18,10 +18,11 @@ warnings.filterwarnings('ignore', message='.*NVML.*')
 
 from dataset import Sim
 from config import get_config
-from model import Linear, CNN, LSTM
+from model import Linear, CNN, LSTM, MUNECNN, Transformer
 from loss import ce, focal_ce, thr, emd
 from utils import set_seed
 from metrics import b_v_metrics
+from visualization import plot_single_sample
 import json
 
 
@@ -37,7 +38,7 @@ def get_args_parser():
     a_parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0=disabled)')
     a_parser.add_argument('--patience', default=20, type=int, help='Early stopping patience')
     a_parser.add_argument('--loss_type', default='emd', choices=['thr', 'focal', 'ce', 'emd'], help='Loss function type: thr=threshold loss, focal=focal loss, ce=cross entropy, emd=earth mover\'s distance')
-    a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
+    a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM', 'MUNECNN', 'Transformer'], help='Model architecture type')
     a_parser.add_argument('--save_best', default=True, type=bool, help='Save best model')
     a_parser.add_argument('--result_dir', default='result', type=str, help='Root directory to save experiment results')
     a_parser.add_argument('--timestamp', default=None, type=str, help='Experiment timestamp (e.g., 20251023_123456). If not provided, auto-generate')
@@ -132,7 +133,8 @@ def main(args):
         print(f"\n🔄 Epoch {epoch+1}/{args.epochs} 开始训练...")
         
         # 训练和验证
-        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.epochs)
+        visual_dir = os.path.join(result_dir, 'train_visual') if result_dir else None
+        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.grad_clip, visual_dir)
         val_loss, val_metrics = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
         
         epoch_time = time.time() - epoch_start_time
@@ -201,7 +203,7 @@ def main(args):
     print(f"   python3 test.py --checkpoint {best_model_path}")
 
 
-def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, total_epochs):
+def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, grad_clip=1.0, visual_dir=None):
     model.train()
     total_loss = 0.0
     batch_count = 0
@@ -224,6 +226,15 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
         optimizer.zero_grad()
         thresholds_pred = model(src["cmap"])  # 模型只输出阈值预测
         
+        # 每100个batch画一次图
+        if visual_dir and batch_idx % 100 == 0:
+            os.makedirs(visual_dir, exist_ok=True)
+            try:
+                save_path = os.path.join(visual_dir, f'train_{current_epoch}_{batch_idx}.png')
+                plot_single_sample(src, thresholds_pred, tgt["thresholds"], save_path, epoch=current_epoch)
+            except Exception as e:
+                print(f"⚠️  训练样本可视化生成失败: {e}")
+        
         # 计算损失
         loss = loss_fn(thresholds_pred, tgt["thresholds"])
         
@@ -231,8 +242,8 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
         loss.backward()
         
         # 梯度裁剪（防止梯度爆炸）
-        if args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+        if grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
         
         optimizer.step()
         

@@ -15,7 +15,7 @@ warnings.filterwarnings('ignore', message='.*NVML.*')
 
 from dataset import Sim
 from config import get_config
-from model import Linear, CNN, LSTM
+from model import Linear, CNN, LSTM, MUNECNN, Transformer
 from metrics import b_v_metrics
 from loss import ce, focal_ce, thr, emd
 import json
@@ -25,26 +25,29 @@ def get_args_parser():
     """解析命令行参数"""
     parser = argparse.ArgumentParser('MU Threshold Prediction Testing', add_help=False)
     parser.add_argument('--device', default='cuda', type=str, help='Device to use (cpu/cuda)')
-    parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM'], help='Model architecture type')
-    parser.add_argument('--hidden_size', default=128, type=int, help='Hidden size for LSTM model (d_model, should match training)')
+    parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM', 'MUNECNN', 'Transformer'], help='Model architecture type')
+    parser.add_argument('--d_model', default=128, type=int, help='Model hidden dimension (should match training)')
+    parser.add_argument('--dropout', default=0.1, type=float, help='Dropout rate (should match training)')
     parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode')
     parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
     parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation')
     parser.add_argument('--timestamp', required=True, type=str, help='Model timestamp (e.g., 20251023_123456)')
     parser.add_argument('--result_dir', default='result', type=str, help='Root directory containing experiment results')
-    parser.add_argument('--batch_size', default=4, type=int, help='Batch size for testing')
+    parser.add_argument('--batch_size', default=32, type=int, help='Batch size for testing')
+    parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers')
+    parser.add_argument('--pin_memory', default=True, type=bool, help='Pin memory for data loading')
     parser.add_argument('--num_collect', default=20, type=int, help='Number of samples to collect and save (0=do not collect)')
     parser.add_argument('--save_samples', default=True, type=bool, help='Save sample data in JSON')
     parser.add_argument('--loss_type', default='emd', choices=['thr', 'focal', 'ce', 'emd'], help='Loss function type')
     parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss')
-    parser.add_argument('--pos_weight', default=7.0, type=float, help='Positive class weight')
+    parser.add_argument('--pos_weight', default=5.0, type=float, help='Positive class weight')
     
     return parser
 
 
 
 
-def load_best_model(model_type, timestamp, result_dir_path, device, hidden_size=64):
+def load_best_model(model_type, timestamp, result_dir_path, device, d_model=128, dropout=0.1):
     """
     根据时间戳加载最佳模型
     
@@ -53,7 +56,8 @@ def load_best_model(model_type, timestamp, result_dir_path, device, hidden_size=
         timestamp: 模型时间戳
         result_dir_path: result目录路径 result/{timestamp}
         device: 设备
-        hidden_size: 模型的隐藏层大小 (d_model)
+        d_model: 模型的隐藏层大小
+        dropout: Dropout率
     
     Returns:
         model: 加载权重后的模型
@@ -66,7 +70,7 @@ def load_best_model(model_type, timestamp, result_dir_path, device, hidden_size=
     
     # 创建模型并加载权重
     try:
-        model = eval(model_type)(d_model=hidden_size).to(device)
+        model = eval(model_type)(d_model=d_model, dropout=dropout).to(device)
     except (NameError, AttributeError) as e:
         raise ValueError(f"无法创建模型 '{model_type}': {e}")
     
@@ -75,7 +79,7 @@ def load_best_model(model_type, timestamp, result_dir_path, device, hidden_size=
     
     # 打印加载信息
     print(f"✅ 成功加载模型: {checkpoint_path}")
-    print(f"   模型类型={model_type}, d_model={hidden_size}")
+    print(f"   模型类型={model_type}, d_model={d_model}, dropout={dropout}")
     
     return model
 
@@ -269,7 +273,7 @@ def main(args):
     
     # 创建并加载模型
     print(f"\n🔧 创建并加载模型: {args.model_type}")
-    model = load_best_model(args.model_type, timestamp, result_dir_path, args.device, args.hidden_size)
+    model = load_best_model(args.model_type, timestamp, result_dir_path, args.device, args.d_model, args.dropout)
     
     # 创建损失函数（支持加权）
     if args.use_weighted_loss and args.loss_type == 'ce':
