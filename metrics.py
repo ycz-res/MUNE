@@ -6,6 +6,9 @@ metrics.py
 
 import torch
 import torch.nn.functional as F
+from typing import Literal
+
+PairingStrategyT = Literal["truncate", "sink_right", "sink_left"]
 
 def emd_binary_norm(pred_bin: torch.Tensor, target_bin: torch.Tensor) -> torch.Tensor:
     """
@@ -37,6 +40,100 @@ def emd_binary_norm(pred_bin: torch.Tensor, target_bin: torch.Tensor) -> torch.T
     emd_norm  = (emd_raw / denom).clamp(0.0, 1.0)         # (B,)
 
     return emd_norm
+
+
+def emd_pair(pred_bin: torch.Tensor, 
+             target_bin: torch.Tensor,
+             pairing_strategy: PairingStrategyT = "truncate",
+             normalization: str = "per_length") -> torch.Tensor:
+    """
+    配对法 EMD（推土机距离）- 不可导，用于评估指标
+    将预测和真实序列中的1进行配对，计算配对位置的距离误差
+    
+    Args:
+        pred_bin (torch.Tensor): (B, L) 已二值化 0/1 预测序列
+        target_bin (torch.Tensor): (B, L) 0/1 真值序列
+        pairing_strategy (str): 配对策略
+            - "truncate": 截断策略，只配对最小数量的1，多余的忽略
+            - "sink_right": 多余1配对到右端（位置L）
+            - "sink_left": 多余1配对到左端（位置-1）
+        normalization (str): 归一化方式
+            - "per_one": 除以 max(#1_pred, #1_true)
+            - "per_length": 除以序列长度 L
+            - "none": 不归一化
+    
+    Returns:
+        (B,) 逐样本 EMD 值（torch.Tensor）
+    """
+    if pred_bin.shape != target_bin.shape:
+        raise ValueError(f"Shape mismatch: {pred_bin.shape} vs {target_bin.shape}")
+    
+    B, L = target_bin.shape
+    device = pred_bin.device
+    
+    # 转 long 类型用于索引
+    p_bin = pred_bin.to(torch.long)
+    t_bin = target_bin.to(torch.long)
+    
+    n_pred_ones = p_bin.sum(dim=1)                  # (B,)
+    n_true_ones = t_bin.sum(dim=1)                  # (B,)
+    n_pairs = torch.minimum(n_pred_ones, n_true_ones)  # (B,)
+    K = int(n_pairs.max().item()) if B > 0 else 0
+    
+    # 使用 torch.no_grad() 因为这是评估指标，不需要梯度
+    with torch.no_grad():
+        if K == 0:
+            # 没有1的情况
+            if pairing_strategy == "truncate":
+                loss_vec = torch.zeros(B, device=device, dtype=torch.float32)
+            else:
+                idx = torch.arange(L, device=device).view(1, L)     # (1, L)
+                sink = L if pairing_strategy == "sink_right" else -1
+                extra_cost = ((p_bin * (idx - sink).abs()).sum(dim=1) +
+                              (t_bin * (idx - sink).abs()).sum(dim=1)).float()
+                loss_vec = extra_cost
+        else:
+            # 给每个1编秩次（第k个1的位置）
+            order_pred = (torch.cumsum(p_bin, dim=1) * p_bin).to(torch.int64)  # (B, L)
+            order_true = (torch.cumsum(t_bin, dim=1) * t_bin).to(torch.int64)  # (B, L)
+            
+            idx = torch.arange(L, device=device).view(1, L)                    # (1, L)
+            ks = torch.arange(1, K+1, device=device).view(1, 1, K)             # (1, 1, K)
+            
+            # 找到每个秩次k对应的位置
+            mask_pred = (order_pred.unsqueeze(2) == ks)                        # (B, L, K)
+            mask_true = (order_true.unsqueeze(2) == ks)                        # (B, L, K)
+            pos_predK = (mask_pred * idx.unsqueeze(2)).sum(dim=1)              # (B, K)
+            pos_trueK = (mask_true * idx.unsqueeze(2)).sum(dim=1)              # (B, K)
+            
+            # 只考虑有效的配对（k <= n_pairs）
+            k_mask = (torch.arange(1, K+1, device=device).view(1, K)
+                      <= n_pairs.view(B, 1))                                   # (B, K)
+            
+            # 计算配对成本：配对位置的距离差
+            pair_cost = ((pos_predK - pos_trueK).abs() * k_mask).sum(dim=1).float()  # (B,)
+            
+            # 多余1的惩罚
+            if pairing_strategy == "truncate":
+                extra_cost = torch.zeros(B, device=device, dtype=torch.float32)
+            else:
+                sink = L if pairing_strategy == "sink_right" else -1
+                extras_pred = (order_pred > n_pairs.view(B, 1))                # (B, L)
+                extras_true = (order_true > n_pairs.view(B, 1))                # (B, L)
+                extra_cost = ((extras_pred * (idx - sink).abs()).sum(dim=1) +
+                              (extras_true * (idx - sink).abs()).sum(dim=1)).float()
+            
+            loss_vec = pair_cost + extra_cost
+        
+        # 归一化
+        if normalization == "per_one":
+            denom = torch.maximum(n_pred_ones, n_true_ones).to(torch.float32).clamp_min(1.0)
+            loss_vec = loss_vec / denom
+        elif normalization == "per_length":
+            loss_vec = loss_vec / float(max(L, 1))
+        # "none" 不归一化，直接返回
+    
+    return loss_vec
 
 
 def b_v_metrics(pred_logits: torch.Tensor,

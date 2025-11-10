@@ -19,11 +19,12 @@ warnings.filterwarnings('ignore', message='.*NVML.*')
 from dataset import Sim
 from config import get_config
 from model import Linear, CNN, LSTM, MUNECNN, Transformer
-from loss import ce, focal_ce, thr, emd
+import loss
 from utils import set_seed
 from metrics import b_v_metrics
-from visualization import plot_single_sample
+from visualize import plot_single_sample
 import json
+import sys
 
 
 def get_args_parser():
@@ -37,7 +38,10 @@ def get_args_parser():
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay (L2 regularization)')
     a_parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0=disabled)')
     a_parser.add_argument('--patience', default=20, type=int, help='Early stopping patience')
-    a_parser.add_argument('--loss_type', default='emd', choices=['thr', 'focal', 'ce', 'emd'], help='Loss function type: thr=threshold loss, focal=focal loss, ce=cross entropy, emd=earth mover\'s distance')
+    a_parser.add_argument('--loss_type', default='emd', 
+                         choices=['ce', 'weighted_bce', 'dice', 'iou', 'f1', 'count', 'emd', 'hamming',
+                                 'jaccard', 'tversky', 'focal_tversky', 'combo', 'mixed'],
+                         help='Loss function type. Available: ce, weighted_bce, dice, iou, f1, count, emd, hamming, jaccard, tversky, focal_tversky, combo, mixed (mixed uses LOSS_CONFIG from loss.py)')
     a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM', 'MUNECNN', 'Transformer'], help='Model architecture type')
     a_parser.add_argument('--save_best', default=True, type=bool, help='Save best model')
     a_parser.add_argument('--result_dir', default='result', type=str, help='Root directory to save experiment results')
@@ -45,14 +49,59 @@ def get_args_parser():
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
     a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.5 is standard, consistent with test)')
-    a_parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss for imbalanced data (only works with --loss_type ce)')
-    a_parser.add_argument('--pos_weight', default=5.0, type=float, help='Positive class weight for CE loss only (ignored for other loss types)')
     a_parser.add_argument('--d_model', default=128, type=int, help='Model hidden dimension (default: 128, larger for better capacity)')
     a_parser.add_argument('--lr_scheduler', default='cosine', choices=['none', 'cosine', 'plateau'], help='Learning rate scheduler type')
     a_parser.add_argument('--warmup_epochs', default=5, type=int, help='Warmup epochs for cosine scheduler')
     a_parser.add_argument('--dropout', default=0.1, type=float, help='Dropout rate for regularization (0.0-1.0)')
+    a_parser.add_argument('--save_log', default=True, type=bool, help='Save console output to log file in result directory')
     
     return a_parser
+
+
+def setup_log(result_dir, timestamp, enable=True):
+    """
+    设置日志重定向：将控制台输出同时保存到文件
+    
+    Args:
+        result_dir: 结果目录路径
+        timestamp: 时间戳
+        enable: 是否启用重定向
+    
+    Returns:
+        restore_func: 恢复函数，调用后恢复标准输出并关闭日志文件
+        log_file_path: 日志文件路径，如果未启用则返回None
+    """
+    log_file_path = os.path.join(result_dir, f'train_{timestamp}.log')
+    
+    if not enable:
+        return lambda: None, None
+    
+    log_file_obj = open(log_file_path, 'w', encoding='utf-8')
+    
+    class Tee:
+        def __init__(self, *files):
+            self.files = files
+        def write(self, obj):
+            for f in self.files:
+                f.write(obj)
+                f.flush()
+        def flush(self):
+            for f in self.files:
+                f.flush()
+    
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    sys.stdout = Tee(sys.stdout, log_file_obj)
+    sys.stderr = Tee(sys.stderr, log_file_obj)
+    print(f"📝 日志文件: {log_file_path}")
+    
+    def restore():
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        log_file_obj.close()
+    
+    return restore, log_file_path
+
 
 def main(args):
     # 设置随机种子
@@ -68,6 +117,9 @@ def main(args):
     result_dir = os.path.join(args.result_dir, timestamp)
     os.makedirs(result_dir, exist_ok=True)
     os.makedirs(os.path.join(result_dir, "checkpoints"), exist_ok=True)
+    
+    # 设置日志重定向
+    restore, log_file_path = setup_log(result_dir, timestamp, enable=args.save_log)
     
     Dataset = eval(args.dataset_type)
     # 数据划分比例：训练集90%，验证集5%，测试集5%
@@ -101,15 +153,9 @@ def main(args):
         scheduler = None
         print(f"📈 不使用学习率调度器")
     
-    # 创建损失函数
-    # 注意：pos_weight 只在 CE 损失时生效
-    if args.use_weighted_loss and args.loss_type == 'ce':
-        pos_weight_tensor = torch.tensor(args.pos_weight, device=args.device)
-        def loss_fn(pred, target):
-            return ce(pred, target, pos_weight=pos_weight_tensor)
-        print(f"📊 使用加权CE损失，正样本权重: {args.pos_weight}")
-    else:
-        loss_fn = eval(args.loss_type)
+    # 创建损失函数（参数从loss.py的LOSS_CONFIG自动读取）
+    loss_fn = getattr(loss, args.loss_type)
+    print(f"📊 使用{args.loss_type}损失（参数从loss.py的LOSS_CONFIG读取）")
     
     # 创建指标函数（使用自定义阈值和模式）
     def metrics_fn(pred, target):
@@ -134,29 +180,29 @@ def main(args):
         
         # 训练和验证
         visual_dir = os.path.join(result_dir, 'train_visual') if result_dir else None
-        train_loss = train_epoch(model, train_loader, optimizer, loss_fn, args.device, epoch+1, args.grad_clip, visual_dir)
-        val_loss, val_metrics = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
+        train_loss_result = train_epoch(model, train_loader, optimizer, loss_fn, epoch+1, visual_dir, args)
+        val_loss_result, val_metrics = validate_epoch(model, val_loader, loss_fn, metrics_fn, args.device)
         
         epoch_time = time.time() - epoch_start_time
         
         # 打印基础指标
         print(f"⏱️  Epoch {epoch+1} 完成，耗时: {epoch_time:.2f}秒")
-        print(f"📊 训练损失: {train_loss:.4f} | 验证损失: {val_loss:.4f}")
+        print(f"📊 训练损失: {train_loss_result['total']:.4f} | 验证损失: {val_loss_result['total']:.4f}")
         if val_metrics:
             print(f"📈 验证指标: {val_metrics}")
         else:
             print("📈 验证指标: None")
         
-        # 记录训练历史
+        # 记录训练历史（train_loss_result和val_loss_result已包含total和losses）
         training_history.append({
             'epoch': epoch + 1,
-            'train_loss': train_loss,
-            'val_loss': val_loss,
-            'val_metrics': val_metrics
+            'val_metrics': val_metrics,
+            'train_loss_result': train_loss_result,
+            'val_loss_result': val_loss_result
         })
         
         # 早停和模型保存（使用验证损失指导）
-        current_loss = val_loss
+        current_loss = val_loss_result['total']
         is_best = current_loss < best_score  # 损失越小越好
         
         if is_best:
@@ -199,14 +245,20 @@ def main(args):
     print(f"\n✅ 训练完成! 最佳模型已保存")
     print(f"   - 模型路径: {best_model_path}")
     print(f"   - 训练数据: {train_data_path}")
+    if args.save_log:
+        print(f"   - 日志文件: {log_file_path}")
     print(f"\n💡 使用以下命令进行测试:")
     print(f"   python3 test.py --checkpoint {best_model_path}")
+    
+    # 恢复日志重定向
+    restore()
 
 
-def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, grad_clip=1.0, visual_dir=None):
+def train_epoch(model, train_loader, optimizer, loss_fn, current_epoch, visual_dir=None, args=None):
     model.train()
     total_loss = 0.0
     batch_count = 0
+    individual_losses_sum = {}  # 用于存储各个损失（mixed loss的情况）
     total_batches = len(train_loader)
     
     # 每10个batch或每25%进度打印一次
@@ -219,6 +271,7 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
     for batch_idx, batch in enumerate(train_loader):
         src, tgt = batch
         # 移动到设备
+        device = args.device
         src = {key: value.to(device) for key, value in src.items()}
         tgt = {key: value.to(device) for key, value in tgt.items()}
         
@@ -231,19 +284,27 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
             os.makedirs(visual_dir, exist_ok=True)
             try:
                 save_path = os.path.join(visual_dir, f'train_{current_epoch}_{batch_idx}.png')
-                plot_single_sample(src, thresholds_pred, tgt["thresholds"], save_path, epoch=current_epoch)
+                plot_single_sample(src, thresholds_pred, tgt["thresholds"], save_path, epoch=current_epoch, threshold=args.metrics_threshold)
             except Exception as e:
                 print(f"⚠️  训练样本可视化生成失败: {e}")
         
         # 计算损失
-        loss = loss_fn(thresholds_pred, tgt["thresholds"])
+        loss_result = loss_fn(thresholds_pred, tgt["thresholds"])
+        
+        # 处理mixed loss返回字典的情况
+        if isinstance(loss_result, dict) and 'total' in loss_result:
+            loss = loss_result['total']
+            for k, v in loss_result.get('losses', {}).items():
+                individual_losses_sum[k] = individual_losses_sum.get(k, 0.0) + v.item()
+        else:
+            loss = loss_result
         
         # 反向传播
         loss.backward()
         
         # 梯度裁剪（防止梯度爆炸）
-        if grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+        if args.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
         
         optimizer.step()
         
@@ -264,13 +325,16 @@ def train_epoch(model, train_loader, optimizer, loss_fn, device, current_epoch, 
             batch_start_time = time.time()
         
     avg_loss = total_loss / batch_count
-    return avg_loss
+    # 统一返回字典格式：包含总损失和各个损失的平均值，并转换为 float
+    avg_individual_losses = {k: float(v / batch_count) for k, v in individual_losses_sum.items()} if individual_losses_sum else {}
+    return {'total': float(avg_loss), 'losses': avg_individual_losses}
 
 
 def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
     model.eval()
     val_loss = 0.0
     val_batch_count = 0
+    individual_losses_sum = {}  # 用于存储各个损失（mixed loss的情况）
     total_val_batches = len(val_loader)
     
     # 收集所有预测和真实值用于计算指标
@@ -287,7 +351,15 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
             tgt = {key: value.to(device) for key, value in tgt.items()}
             
             thresholds_pred = model(src["cmap"])  # 模型只输出阈值预测
-            loss = loss_fn(thresholds_pred, tgt["thresholds"])
+            loss_result = loss_fn(thresholds_pred, tgt["thresholds"])
+            
+            # 处理mixed loss返回字典的情况
+            if isinstance(loss_result, dict) and 'total' in loss_result:
+                loss = loss_result['total']
+                for k, v in loss_result.get('losses', {}).items():
+                    individual_losses_sum[k] = individual_losses_sum.get(k, 0.0) + v.item()
+            else:
+                loss = loss_result
             
             val_loss += loss.item()
             val_batch_count += 1
@@ -310,8 +382,11 @@ def validate_epoch(model, val_loader, loss_fn, metrics_fn, device):
         val_metrics = metrics_fn(all_pred, all_true)
         
         avg_val_loss = val_loss / val_batch_count
+        # 统一返回字典格式：包含总损失和各个损失的平均值，并转换为 float
+        avg_individual_losses = {k: float(v / val_batch_count) for k, v in individual_losses_sum.items()} if individual_losses_sum else {}
+        val_loss_result = {'total': float(avg_val_loss), 'losses': avg_individual_losses}
         print(f"  ✅ 验证完成: {val_batch_count} batches")
-        return avg_val_loss, val_metrics
+        return val_loss_result, val_metrics
     else:
         raise RuntimeError("验证阶段无法计算指标，请检查数据或指标函数")
 

@@ -61,10 +61,10 @@ python3 test.py --timestamp 20251023_214442 --num_collect 50
 
 ```bash
 # Use timestamp to automatically match train and test data
-python3 plot/visualization.py --timestamp 20251023_214442
+python3 visualize.py --timestamp 20251023_214442
 
 # Manually specify data files
-python3 plot/visualization.py \
+python3 visualize.py \
   --train_json plot/curve_data/train_xxx.json \
   --test_json plot/curve_data/test_xxx.json
 ```
@@ -96,8 +96,8 @@ MUNE/
 │       ├── data.mat      # Raw data
 │       ├── data.npz      # Preprocessed data
 │       └── preprocess_sim.py
+├── visualize.py          # Visualization generation
 ├── plot/
-│   ├── visualization.py  # Visualization generation
 │   ├── curve_data/       # Train/test data (JSON)
 │   └── visual_res/       # Visualization charts
 ├── assets/               # README resources

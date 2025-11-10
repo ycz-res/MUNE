@@ -17,7 +17,7 @@ from dataset import Sim
 from config import get_config
 from model import Linear, CNN, LSTM, MUNECNN, Transformer
 from metrics import b_v_metrics
-from loss import ce, focal_ce, thr, emd
+import loss
 import json
 
 
@@ -38,9 +38,10 @@ def get_args_parser():
     parser.add_argument('--pin_memory', default=True, type=bool, help='Pin memory for data loading')
     parser.add_argument('--num_collect', default=20, type=int, help='Number of samples to collect and save (0=do not collect)')
     parser.add_argument('--save_samples', default=True, type=bool, help='Save sample data in JSON')
-    parser.add_argument('--loss_type', default='emd', choices=['thr', 'focal', 'ce', 'emd'], help='Loss function type')
-    parser.add_argument('--use_weighted_loss', default=True, type=bool, help='Use weighted loss')
-    parser.add_argument('--pos_weight', default=5.0, type=float, help='Positive class weight')
+    parser.add_argument('--loss_type', default='emd', 
+                         choices=['ce', 'weighted_bce', 'dice', 'iou', 'f1', 'count', 'emd', 'hamming',
+                                 'jaccard', 'tversky', 'focal_tversky', 'combo', 'mixed'],
+                         help='Loss function type. Available: ce, weighted_bce, dice, iou, f1, count, emd, hamming, jaccard, tversky, focal_tversky, combo, mixed (mixed uses LOSS_CONFIG from loss.py)')
     
     return parser
 
@@ -84,7 +85,7 @@ def load_best_model(model_type, timestamp, result_dir_path, device, d_model=128,
     return model
 
 
-def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
+def test(model, dataset, loss_fn, metrics_fn, device,
          show_progress=True, num_collect=None, batch_size=4):
     """
     在数据集上测试模型（随机采样指定数量样本）
@@ -92,16 +93,16 @@ def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
     Args:
         model: 模型
         dataset: 数据集
-        loss_fn: 损失函数
-        metrics_fn: 指标计算函数
+        loss_fn: 损失函数（已配置好参数）
+        metrics_fn: 指标计算函数（已配置好threshold和mode参数）
         device: 设备
-        threshold: 阈值（用于损失计算，不影响metrics_fn，metrics_fn内部会根据mode处理）
         show_progress: 是否显示进度
         num_collect: 测试和收集的样本数量，None表示使用全部数据
         batch_size: 批处理大小
     
     Returns:
-        avg_loss: 平均损失
+        loss_result: 损失结果字典，格式为 {'total': 总损失, 'losses': {损失名: 损失值, ...}}
+                    对于单个损失函数，losses字典为空；对于mixed损失，包含各个损失分量
         metrics: 指标字典
         sample_data: 样本数据字典
     """
@@ -139,6 +140,7 @@ def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
     
     # 分批预测（避免显存溢出）
     total_loss = 0.0
+    individual_losses_sum = {}  # 用于存储各个损失（mixed loss的情况）
     all_preds = []
     all_targets = []
     num_batches = (num_test + batch_size - 1) // batch_size
@@ -153,7 +155,14 @@ def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
             outputs = model(batch_cmap)
             
             # 计算损失
-            loss = loss_fn(outputs, batch_thresholds)
+            loss_result = loss_fn(outputs, batch_thresholds)
+            # 处理mixed loss返回字典的情况
+            if isinstance(loss_result, dict) and 'total' in loss_result:
+                loss = loss_result['total']
+                for k, v in loss_result.get('losses', {}).items():
+                    individual_losses_sum[k] = individual_losses_sum.get(k, 0.0) + v.item()
+            else:
+                loss = loss_result
             total_loss += loss.item()
             
             # 根据threshold_mode决定是否二值化
@@ -176,6 +185,10 @@ def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
     
     # 计算平均损失和指标
     avg_loss = total_loss / num_batches
+    # 统一返回字典格式：包含总损失和各个损失的平均值，并转换为 float
+    avg_individual_losses = {k: float(v / num_batches) for k, v in individual_losses_sum.items()} if individual_losses_sum else {}
+    loss_result_dict = {'total': float(avg_loss), 'losses': avg_individual_losses}
+    
     metrics = metrics_fn(all_preds, all_targets)
     
     # 组装样本数据
@@ -187,10 +200,10 @@ def test(model, dataset, loss_fn, metrics_fn, device, threshold=0.5,
         'mus_true': torch.stack(mus_list).numpy()
     }
     
-    return avg_loss, metrics, sample_data
+    return loss_result_dict, metrics, sample_data
 
 
-def save_test_data(test_loss, test_metrics, sample_data, timestamp, result_dir=None, save_samples=True, args=None, config=None):
+def save_test_data(test_loss_result, test_metrics, sample_data, timestamp, result_dir=None, save_samples=True, args=None, config=None):
     """保存测试数据"""
     print(f"\n📊 保存测试数据...")
     
@@ -199,10 +212,10 @@ def save_test_data(test_loss, test_metrics, sample_data, timestamp, result_dir=N
         result_dir = os.path.join('result', timestamp)
     os.makedirs(result_dir, exist_ok=True)
     
-    # 准备测试数据
+    # 准备测试数据（test_loss_result 已经在 test 函数中转换为 float）
     test_data = {
         'timestamp': timestamp,
-        'test_loss': float(test_loss),
+        'test_loss_result': test_loss_result,
         'test_metrics': {k: float(v) for k, v in test_metrics.items()},
         'num_samples': len(sample_data['indices'])
     }
@@ -275,13 +288,9 @@ def main(args):
     print(f"\n🔧 创建并加载模型: {args.model_type}")
     model = load_best_model(args.model_type, timestamp, result_dir_path, args.device, args.d_model, args.dropout)
     
-    # 创建损失函数（支持加权）
-    if args.use_weighted_loss and args.loss_type == 'ce':
-        pos_weight_tensor = torch.tensor(args.pos_weight, device=args.device)
-        def loss_fn(pred, target):
-            return ce(pred, target, pos_weight=pos_weight_tensor)
-    else:
-        loss_fn = eval(args.loss_type)
+    # 创建损失函数（参数从loss.py的LOSS_CONFIG自动读取）
+    loss_fn = getattr(loss, args.loss_type)
+    print(f"📊 使用{args.loss_type}损失（参数从loss.py的LOSS_CONFIG读取）")
     
     # 创建指标函数（使用自定义阈值和模式）
     def metrics_fn(pred, target):
@@ -289,9 +298,8 @@ def main(args):
     
     # 执行测试
     print("\n🧪 测试阶段")
-    test_loss, test_metrics, sample_data = test(
+    test_loss_result, test_metrics, sample_data = test(
         model, test_dataset, loss_fn, metrics_fn, args.device,
-        threshold=args.metrics_threshold,
         show_progress=True, 
         num_collect=args.num_collect if args.num_collect > 0 else None,
         batch_size=args.batch_size
@@ -301,13 +309,19 @@ def main(args):
     print("\n" + "=" * 60)
     print("📊 测试结果:")
     print("=" * 60)
-    print(f"   Loss: {test_loss:.6f}")
+    for key, value in test_loss_result.items():
+        if key == 'total':
+            print(f"   Loss: {value:.6f}")
+        elif key == 'losses' and value:
+            print("   损失分量:")
+            for loss_name, loss_value in value.items():
+                print(f"     {loss_name}: {loss_value:.6f}")
     for metric_name, metric_value in test_metrics.items():
         print(f"   {metric_name}: {metric_value:.4f}")
     print("=" * 60)
     
     # 保存测试数据
-    save_test_data(test_loss, test_metrics, sample_data, timestamp, result_dir=result_dir_path, save_samples=args.save_samples, args=args, config=config)
+    save_test_data(test_loss_result, test_metrics, sample_data, timestamp, result_dir=result_dir_path, save_samples=args.save_samples, args=args, config=config)
 
 
 if __name__ == '__main__':

@@ -32,6 +32,100 @@ def load_tasks():
     return {'pending': [], 'running': [], 'completed': [], 'failed': [], 'cancelled': []}
 
 
+@st.cache_data(ttl=60)
+def get_result_directories(result_dir: str):
+    """Get all result directories with metadata (cached for 60s)"""
+    result_path = Path(result_dir)
+    if not result_path.exists():
+        return []
+    
+    result_dirs = []
+    for d in result_path.iterdir():
+        if d.is_dir():
+            try:
+                mod_time = datetime.fromtimestamp(d.stat().st_mtime)
+                result_dirs.append({
+                    'name': d.name,
+                    'path': d,
+                    'modified': mod_time,
+                    'timestamp': mod_time.timestamp()
+                })
+            except (OSError, ValueError):
+                continue
+    
+    return sorted(result_dirs, key=lambda x: x['timestamp'], reverse=True)
+
+
+@st.cache_data(ttl=300)
+def get_result_metadata(result_dir: Path):
+    """Get metadata for a result directory (cached for 5 minutes)"""
+    metadata = {
+        'has_train_visual': (result_dir / 'train_visual').exists(),
+        'has_visual': (result_dir / 'visual').exists(),
+        'has_train_json': False,
+        'has_test_json': False,
+        'train_visual_count': 0,
+        'visual_count': 0,
+        'total_files': 0
+    }
+    
+    # Check JSON files
+    train_json = result_dir / f'train_{result_dir.name}.json'
+    test_json = result_dir / f'test_{result_dir.name}.json'
+    metadata['has_train_json'] = train_json.exists()
+    metadata['has_test_json'] = test_json.exists()
+    
+    # Count images (faster than counting all files)
+    train_visual_dir = result_dir / 'train_visual'
+    if train_visual_dir.exists():
+        metadata['train_visual_count'] = len(list(train_visual_dir.glob('*.png')))
+    
+    visual_dir = result_dir / 'visual'
+    if visual_dir.exists():
+        metadata['visual_count'] = len(list(visual_dir.glob('*.png')))
+    
+    # Count files in key directories only (avoid full rglob)
+    key_dirs = ['train_visual', 'visual', 'checkpoints']
+    for key_dir in key_dirs:
+        key_path = result_dir / key_dir
+        if key_path.exists():
+            metadata['total_files'] += len(list(key_path.rglob('*')))
+    
+    # Add JSON and log files
+    metadata['total_files'] += len(list(result_dir.glob('*.json')))
+    metadata['total_files'] += len(list(result_dir.glob('*.log')))
+    
+    return metadata
+
+
+@st.cache_data(ttl=300)
+def get_train_images_by_epoch(train_visual_dir: Path):
+    """Group training images by epoch (cached for 5 minutes)"""
+    if not train_visual_dir.exists():
+        return {}
+    
+    images_by_epoch = {}
+    train_images = sorted([f for f in train_visual_dir.glob('*.png')], key=lambda x: x.name)
+    
+    for img in train_images:
+        parts = img.stem.split('_')
+        if len(parts) >= 3 and parts[0] == 'train':
+            try:
+                epoch = int(parts[1])
+                step = int(parts[2])
+                if epoch not in images_by_epoch:
+                    images_by_epoch[epoch] = []
+                images_by_epoch[epoch].append((step, img))
+            except ValueError:
+                continue
+    
+    # Sort steps within each epoch
+    for epoch in images_by_epoch:
+        images_by_epoch[epoch].sort(key=lambda x: x[0])
+    
+    return images_by_epoch
+
+
 def save_tasks(tasks):
     """Save task pool"""
     with open(TASKS_FILE, 'w', encoding='utf-8') as f:
@@ -80,7 +174,7 @@ def build_args(task, script_name, timestamp=None, result_dir=None):
     elif script_name == 'test.py':
         valid_args = valid_test_args
     else:
-        valid_args = set()  # visualization.py doesn't need task args
+        valid_args = set()  # visualize.py doesn't need task args
     
     # Debug: log what we're processing
     logger.debug(f"Building args for {script_name} with task keys: {list(task.keys())}")
@@ -255,7 +349,7 @@ def execute_task(task, result_dir, status_container=None):
         update_status("Starting visualization phase...")
         start = time.time()
         try:
-            run_cmd(build_args({}, 'visualization.py', timestamp, result_dir),
+            run_cmd(build_args({}, 'visualize.py', timestamp, result_dir),
                    task_log_dir / 'visualization.log')
             viz_time = time.time() - start
             update_status(f"Visualization completed in {viz_time:.2f} seconds", 'success')
@@ -455,8 +549,8 @@ for idx, (label, value, color) in enumerate(stats_config):
 st.divider()
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "⏳ Pending", "🚀 Running", "✅ Completed", "❌ Failed", "➕ New Task"
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    "⏳ Pending", "🚀 Running", "✅ Completed", "❌ Failed", "➕ New Task", "📊 Results"
 ])
 
 # Pending tasks
@@ -805,6 +899,536 @@ with tab5:
                 time.sleep(0.5)
                 st.rerun()
 
+# Results visualization
+with tab6:
+    st.subheader("📊 Results Visualization")
+    
+    # Get all result directories (cached)
+    result_dirs_data = get_result_directories(RESULT_DIR)
+    
+    if not result_dirs_data:
+        st.info("✨ No results found")
+    else:
+        # Search and filter
+        col_search, col_filter = st.columns([3, 1])
+        with col_search:
+            search_query = st.text_input("🔍 Search results", key="result_search", placeholder="Search by timestamp or task name...")
+        with col_filter:
+            filter_option = st.selectbox("Filter", ["All", "With Train Visual", "With Test Visual", "With Both"], key="result_filter")
+        
+        # Filter directories
+        filtered_dirs = result_dirs_data
+        if search_query:
+            filtered_dirs = [d for d in filtered_dirs if search_query.lower() in d['name'].lower()]
+        
+        if filter_option == "With Train Visual":
+            filtered_dirs = [d for d in filtered_dirs if (d['path'] / 'train_visual').exists()]
+        elif filter_option == "With Test Visual":
+            filtered_dirs = [d for d in filtered_dirs if (d['path'] / 'visual').exists()]
+        elif filter_option == "With Both":
+            filtered_dirs = [d for d in filtered_dirs if (d['path'] / 'train_visual').exists() and (d['path'] / 'visual').exists()]
+        
+        if not filtered_dirs:
+            st.info("✨ No results match the search criteria")
+        else:
+            # Select result directory
+            dir_names = [d['name'] for d in filtered_dirs]
+            selected_idx = st.selectbox(
+                f"Select Result Directory ({len(filtered_dirs)}/{len(result_dirs_data)})",
+                range(len(dir_names)),
+                format_func=lambda x: f"{dir_names[x]} ({filtered_dirs[x]['modified'].strftime('%Y-%m-%d %H:%M')})",
+                key="result_dir_selector"
+            )
+            
+            if selected_idx is not None:
+                selected_dir_data = filtered_dirs[selected_idx]
+                selected_dir = selected_dir_data['path']
+                selected_dir_name = selected_dir_data['name']
+                
+                # Get metadata (cached)
+                metadata = get_result_metadata(selected_dir)
+                
+                # Show directory info
+                col_info1, col_info2, col_info3, col_info4 = st.columns(4)
+                with col_info1:
+                    st.metric("Directory", selected_dir_name)
+                with col_info2:
+                    st.metric("Last Modified", selected_dir_data['modified'].strftime("%Y-%m-%d %H:%M:%S"))
+                with col_info3:
+                    st.metric("Total Files", metadata['total_files'])
+                with col_info4:
+                    st.metric("Train Images", metadata['train_visual_count'])
+                
+                st.divider()
+                
+                # Create tabs for different visualizations
+                viz_tabs = st.tabs(["📈 Training Visualizations", "🎯 Test Visualizations", "📄 Results Data", "📋 Logs", "🔀 Compare"])
+                
+                # Training visualizations tab
+                with viz_tabs[0]:
+                    train_visual_dir = selected_dir / 'train_visual'
+                    if train_visual_dir.exists():
+                        # Get images grouped by epoch (cached)
+                        images_by_epoch = get_train_images_by_epoch(train_visual_dir)
+                        
+                        if images_by_epoch:
+                            total_images = sum(len(imgs) for imgs in images_by_epoch.values())
+                            st.markdown(f"### Training Visualizations ({total_images} images across {len(images_by_epoch)} epochs)")
+                            
+                            if images_by_epoch:
+                                # Select epoch
+                                epochs = sorted(images_by_epoch.keys())
+                                
+                                # Track previous epoch to reset page when epoch changes
+                                epoch_key = f"prev_epoch_{selected_dir_name}"
+                                if epoch_key not in st.session_state:
+                                    st.session_state[epoch_key] = None
+                                
+                                selected_epoch = st.selectbox(
+                                    "Select Epoch",
+                                    epochs,
+                                    index=0 if epochs else None,
+                                    key="epoch_selector"
+                                )
+                                
+                                # Reset page when epoch changes
+                                if st.session_state[epoch_key] != selected_epoch:
+                                    page_key = f"page_{selected_dir_name}_{selected_epoch}"
+                                    st.session_state[page_key] = 1
+                                    st.session_state[epoch_key] = selected_epoch
+                                
+                                if selected_epoch:
+                                    # Show images for selected epoch, sorted by step
+                                    epoch_images = sorted(images_by_epoch[selected_epoch], key=lambda x: x[0])
+                                    
+                                    # Filter by step range
+                                    steps = [step for step, _ in epoch_images]
+                                    if steps:
+                                        min_step, max_step = min(steps), max(steps)
+                                        step_range = st.slider(
+                                            "Step Range",
+                                            min_value=min_step,
+                                            max_value=max_step,
+                                            value=(min_step, max_step),
+                                            step=100,
+                                            key="step_range_selector"
+                                        )
+                                        
+                                        # Filter images by step range
+                                        filtered_images = [(step, img) for step, img in epoch_images 
+                                                          if step_range[0] <= step <= step_range[1]]
+                                        
+                                        # Pagination for lazy loading
+                                        if filtered_images:
+                                            st.markdown(f"**Total:** {len(filtered_images)} images")
+                                            
+                                            # Pagination controls
+                                            images_per_page = st.slider(
+                                                "Images per page",
+                                                min_value=6,
+                                                max_value=30,
+                                                value=12,
+                                                step=6,
+                                                key=f"images_per_page_{selected_dir_name}_{selected_epoch}"
+                                            )
+                                            
+                                            total_pages = (len(filtered_images) + images_per_page - 1) // images_per_page
+                                            
+                                            # Initialize page in session state if not exists
+                                            page_key = f"page_{selected_dir_name}_{selected_epoch}"
+                                            if page_key not in st.session_state:
+                                                st.session_state[page_key] = 1
+                                            
+                                            if total_pages > 1:
+                                                # Use key parameter - Streamlit manages state automatically
+                                                page = st.number_input(
+                                                    f"Page (1-{total_pages})",
+                                                    min_value=1,
+                                                    max_value=total_pages,
+                                                    value=st.session_state.get(page_key, 1),
+                                                    step=1,
+                                                    key=page_key
+                                                )
+                                            else:
+                                                page = 1
+                                                st.session_state[page_key] = 1
+                                            
+                                            # Calculate page range (get page from session state)
+                                            current_page = st.session_state.get(page_key, 1)
+                                            start_idx = (current_page - 1) * images_per_page
+                                            end_idx = min(start_idx + images_per_page, len(filtered_images))
+                                            page_images = filtered_images[start_idx:end_idx]
+                                            
+                                            st.caption(f"Showing {start_idx + 1}-{end_idx} of {len(filtered_images)} images")
+                                            
+                                            # Display images in grid with lazy loading
+                                            cols_per_row = 3
+                                            for i in range(0, len(page_images), cols_per_row):
+                                                cols = st.columns(cols_per_row)
+                                                for j, (step, img_path) in enumerate(page_images[i:i+cols_per_row]):
+                                                    with cols[j]:
+                                                        # Use container to enable lazy loading behavior
+                                                        with st.container():
+                                                            st.image(
+                                                                str(img_path), 
+                                                                caption=f"Epoch {selected_epoch}, Step {step}", 
+                                                                use_container_width=True
+                                                            )
+                                            
+                                            # Navigation buttons
+                                            if total_pages > 1:
+                                                # Get current page from session state
+                                                current_page = st.session_state.get(page_key, 1)
+                                                nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+                                                with nav_col1:
+                                                    if current_page > 1:
+                                                        if st.button("◀ Previous", key=f"prev_{selected_dir_name}_{selected_epoch}"):
+                                                            st.session_state[page_key] = current_page - 1
+                                                            st.rerun()
+                                                with nav_col2:
+                                                    st.markdown(f"<div style='text-align: center; padding-top: 0.5rem;'>{current_page} / {total_pages}</div>", unsafe_allow_html=True)
+                                                with nav_col3:
+                                                    if current_page < total_pages:
+                                                        if st.button("Next ▶", key=f"next_{selected_dir_name}_{selected_epoch}"):
+                                                            st.session_state[page_key] = current_page + 1
+                                                            st.rerun()
+                        else:
+                            st.info("No training visualization images found")
+                    else:
+                        st.info("Training visualization directory not found")
+                
+                # Test visualizations tab
+                with viz_tabs[1]:
+                    visual_dir = selected_dir / 'visual'
+                    if visual_dir.exists():
+                        # Get all test visualization images
+                        test_images = sorted([f for f in visual_dir.glob('*.png')])
+                        
+                        if test_images:
+                            st.markdown(f"### Test Visualizations ({len(test_images)} images)")
+                            
+                            # Pagination for lazy loading
+                            images_per_page = st.slider(
+                                "Images per page",
+                                min_value=2,
+                                max_value=10,
+                                value=4,
+                                step=2,
+                                key=f"test_images_per_page_{selected_dir_name}"
+                            )
+                            
+                            total_pages = (len(test_images) + images_per_page - 1) // images_per_page
+                            
+                            # Initialize page in session state if not exists
+                            test_page_key = f"test_page_{selected_dir_name}"
+                            if test_page_key not in st.session_state:
+                                st.session_state[test_page_key] = 1
+                            
+                            if total_pages > 1:
+                                # Use key parameter - Streamlit manages state automatically
+                                page = st.number_input(
+                                    f"Page (1-{total_pages})",
+                                    min_value=1,
+                                    max_value=total_pages,
+                                    value=st.session_state.get(test_page_key, 1),
+                                    step=1,
+                                    key=test_page_key
+                                )
+                            else:
+                                page = 1
+                                st.session_state[test_page_key] = 1
+                            
+                            # Calculate page range (get page from session state)
+                            current_page = st.session_state.get(test_page_key, 1)
+                            start_idx = (current_page - 1) * images_per_page
+                            end_idx = min(start_idx + images_per_page, len(test_images))
+                            page_images = test_images[start_idx:end_idx]
+                            
+                            st.caption(f"Showing {start_idx + 1}-{end_idx} of {len(test_images)} images")
+                            
+                            # Display images in grid with lazy loading
+                            cols_per_row = 2
+                            for i in range(0, len(page_images), cols_per_row):
+                                cols = st.columns(cols_per_row)
+                                for j, img_path in enumerate(page_images[i:i+cols_per_row]):
+                                    with cols[j]:
+                                        # Use container to enable lazy loading behavior
+                                        with st.container():
+                                            st.image(str(img_path), caption=img_path.stem, use_container_width=True)
+                            
+                            # Navigation buttons
+                            if total_pages > 1:
+                                # Get current page from session state
+                                current_page = st.session_state.get(test_page_key, 1)
+                                nav_col1, nav_col2, nav_col3 = st.columns([1, 2, 1])
+                                with nav_col1:
+                                    if current_page > 1:
+                                        if st.button("◀ Previous", key=f"test_prev_{selected_dir_name}"):
+                                            st.session_state[test_page_key] = current_page - 1
+                                            st.rerun()
+                                with nav_col2:
+                                    st.markdown(f"<div style='text-align: center; padding-top: 0.5rem;'>{current_page} / {total_pages}</div>", unsafe_allow_html=True)
+                                with nav_col3:
+                                    if current_page < total_pages:
+                                        if st.button("Next ▶", key=f"test_next_{selected_dir_name}"):
+                                            st.session_state[test_page_key] = current_page + 1
+                                            st.rerun()
+                        else:
+                            st.info("No test visualization images found")
+                    else:
+                        st.info("Test visualization directory not found")
+                
+                # Results data tab
+                with viz_tabs[2]:
+                    st.markdown("### Results Data")
+                    
+                    # Training results
+                    train_json = selected_dir / f'train_{selected_dir_name}.json'
+                    test_json = selected_dir / f'test_{selected_dir_name}.json'
+                    
+                    res_data_tabs = st.tabs(["Training Results", "Test Results"])
+                    
+                    with res_data_tabs[0]:
+                        if train_json.exists():
+                            with open(train_json, 'r') as f:
+                                train_data = json.load(f)
+                            
+                            # Display metrics if available
+                            if 'metrics' in train_data or 'train_metrics' in train_data:
+                                metrics = train_data.get('metrics', train_data.get('train_metrics', {}))
+                                if metrics:
+                                    st.subheader("Training Metrics")
+                                    metric_cols = st.columns(min(len(metrics), 4))
+                                    for idx, (metric, value) in enumerate(metrics.items()):
+                                        if isinstance(value, (int, float)):
+                                            with metric_cols[idx % len(metric_cols)]:
+                                                st.metric(metric, f"{value:.4f}")
+                            
+                            # Display full JSON
+                            with st.expander("View Full JSON", expanded=False):
+                                st.json(train_data)
+                        else:
+                            st.info("Training results JSON not found")
+                    
+                    with res_data_tabs[1]:
+                        if test_json.exists():
+                            with open(test_json, 'r') as f:
+                                test_data = json.load(f)
+                            
+                            # Display metrics if available
+                            if 'test_metrics' in test_data:
+                                st.subheader("Test Metrics")
+                                metrics = test_data['test_metrics']
+                                metric_cols = st.columns(min(len(metrics), 4))
+                                for idx, (metric, value) in enumerate(metrics.items()):
+                                    if isinstance(value, (int, float)):
+                                        with metric_cols[idx % len(metric_cols)]:
+                                            st.metric(metric, f"{value:.4f}")
+                            
+                            # Display full JSON
+                            with st.expander("View Full JSON", expanded=False):
+                                st.json(test_data)
+                        else:
+                            st.info("Test results JSON not found")
+                
+                # Logs tab
+                with viz_tabs[3]:
+                    st.markdown("### Logs")
+                    
+                    log_files = {
+                        'Training Log': selected_dir / 'train.log',
+                        'Test Log': selected_dir / 'test.log',
+                        'Visualization Log': selected_dir / 'visualization.log',
+                        'Training Log (JSON)': selected_dir / f'train_{selected_dir_name}.log'
+                    }
+                    
+                    log_tabs = st.tabs(list(log_files.keys()))
+                    for tab, (log_name, log_file) in zip(log_tabs, log_files.items()):
+                        with tab:
+                            if log_file.exists():
+                                file_size = log_file.stat().st_size
+                                file_size_mb = file_size / (1024 * 1024)
+                                
+                                # For large files, show pagination
+                                if file_size_mb > 1:
+                                    st.warning(f"⚠️ Large log file ({file_size_mb:.2f} MB). Showing last 1000 lines.")
+                                    
+                                    # Read last N lines
+                                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                                        lines = f.readlines()
+                                        log_content = ''.join(lines[-1000:])
+                                    
+                                    st.text_area("", log_content, height=400, key=f"log_{selected_dir_name}_{log_name}")
+                                    
+                                    # Download button
+                                    with open(log_file, 'rb') as f:
+                                        log_data = f.read()
+                                    st.download_button(
+                                        label="📥 Download Full Log",
+                                        data=log_data,
+                                        file_name=log_file.name,
+                                        mime="text/plain",
+                                        key=f"download_{selected_dir_name}_{log_name}"
+                                    )
+                                else:
+                                    with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
+                                        log_content = f.read()
+                                    
+                                    # Search in log
+                                    search_log = st.text_input("🔍 Search in log", key=f"search_{selected_dir_name}_{log_name}")
+                                    if search_log:
+                                        lines = log_content.split('\n')
+                                        matching_lines = [line for line in lines if search_log.lower() in line.lower()]
+                                        if matching_lines:
+                                            st.text_area("", '\n'.join(matching_lines), height=400, key=f"log_filtered_{selected_dir_name}_{log_name}")
+                                        else:
+                                            st.info("No matches found")
+                                    else:
+                                        st.text_area("", log_content, height=400, key=f"log_{selected_dir_name}_{log_name}")
+                            else:
+                                st.info(f"{log_name} not found")
+                
+                # Compare tab
+                with viz_tabs[4]:
+                    st.markdown("### Compare Results")
+                    
+                    # Select second result to compare
+                    compare_dirs = [d for d in result_dirs_data if d['name'] != selected_dir_name]
+                    
+                    if not compare_dirs:
+                        st.info("No other results available for comparison")
+                    else:
+                        compare_idx = st.selectbox(
+                            "Select Result to Compare",
+                            range(len(compare_dirs)),
+                            format_func=lambda x: f"{compare_dirs[x]['name']} ({compare_dirs[x]['modified'].strftime('%Y-%m-%d %H:%M')})",
+                            key="compare_dir_selector"
+                        )
+                        
+                        if compare_idx is not None:
+                            compare_dir_data = compare_dirs[compare_idx]
+                            compare_dir = compare_dir_data['path']
+                            compare_dir_name = compare_dir_data['name']
+                            
+                            # Compare metrics
+                            compare_metrics_tab, compare_visual_tab = st.tabs(["Metrics Comparison", "Visual Comparison"])
+                            
+                            with compare_metrics_tab:
+                                # Load both JSON files
+                                selected_train_json = selected_dir / f'train_{selected_dir_name}.json'
+                                selected_test_json = selected_dir / f'test_{selected_dir_name}.json'
+                                compare_train_json = compare_dir / f'train_{compare_dir_name}.json'
+                                compare_test_json = compare_dir / f'test_{compare_dir_name}.json'
+                                
+                                # Compare test metrics
+                                if selected_test_json.exists() and compare_test_json.exists():
+                                    with open(selected_test_json, 'r') as f:
+                                        selected_test_data = json.load(f)
+                                    with open(compare_test_json, 'r') as f:
+                                        compare_test_data = json.load(f)
+                                    
+                                    if 'test_metrics' in selected_test_data and 'test_metrics' in compare_test_data:
+                                        st.subheader("Test Metrics Comparison")
+                                        
+                                        selected_metrics = selected_test_data['test_metrics']
+                                        compare_metrics = compare_test_data['test_metrics']
+                                        
+                                        # Create comparison table
+                                        comparison_data = {
+                                            'Metric': [],
+                                            selected_dir_name: [],
+                                            compare_dir_name: [],
+                                            'Difference': []
+                                        }
+                                        
+                                        for metric in ['Precision', 'Recall', 'F1', 'IoU', 'EMD', 'Score']:
+                                            if metric in selected_metrics and metric in compare_metrics:
+                                                selected_val = selected_metrics[metric]
+                                                compare_val = compare_metrics[metric]
+                                                diff = selected_val - compare_val
+                                                
+                                                comparison_data['Metric'].append(metric)
+                                                comparison_data[selected_dir_name].append(f"{selected_val:.4f}")
+                                                comparison_data[compare_dir_name].append(f"{compare_val:.4f}")
+                                                comparison_data['Difference'].append(f"{diff:+.4f}")
+                                        
+                                        df = pd.DataFrame(comparison_data)
+                                        st.dataframe(df, use_container_width=True, hide_index=True)
+                                        
+                                        # Visual comparison
+                                        metrics_list = ['Precision', 'Recall', 'F1', 'IoU', 'EMD', 'Score']
+                                        selected_values = [selected_metrics.get(m, 0) for m in metrics_list]
+                                        compare_values = [compare_metrics.get(m, 0) for m in metrics_list]
+                                        
+                                        comparison_df = pd.DataFrame({
+                                            'Metric': metrics_list,
+                                            selected_dir_name: selected_values,
+                                            compare_dir_name: compare_values
+                                        })
+                                        
+                                        st.bar_chart(comparison_df.set_index('Metric'))
+                                    
+                                    # Compare losses
+                                    if 'test_loss' in selected_test_data and 'test_loss' in compare_test_data:
+                                        st.subheader("Test Loss Comparison")
+                                        loss_col1, loss_col2, loss_col3 = st.columns(3)
+                                        with loss_col1:
+                                            st.metric(selected_dir_name, f"{selected_test_data['test_loss']:.6f}")
+                                        with loss_col2:
+                                            st.metric(compare_dir_name, f"{compare_test_data['test_loss']:.6f}")
+                                        with loss_col3:
+                                            diff = selected_test_data['test_loss'] - compare_test_data['test_loss']
+                                            st.metric("Difference", f"{diff:+.6f}")
+                                else:
+                                    st.info("Test results not available for both results")
+                            
+                            with compare_visual_tab:
+                                st.info("Visual comparison feature coming soon...")
+                                
+                                # Compare training visualizations
+                                selected_train_visual = selected_dir / 'train_visual'
+                                compare_train_visual = compare_dir / 'train_visual'
+                                
+                                if selected_train_visual.exists() and compare_train_visual.exists():
+                                    st.markdown("#### Training Visualizations Comparison")
+                                    st.caption("Select the same epoch and step to compare")
+                                    
+                                    # Get epochs for both
+                                    selected_epochs_data = get_train_images_by_epoch(selected_train_visual)
+                                    compare_epochs_data = get_train_images_by_epoch(compare_train_visual)
+                                    
+                                    common_epochs = sorted(set(selected_epochs_data.keys()) & set(compare_epochs_data.keys()))
+                                    
+                                    if common_epochs:
+                                        compare_epoch = st.selectbox("Select Epoch", common_epochs, key="compare_epoch")
+                                        
+                                        if compare_epoch:
+                                            selected_epoch_imgs = selected_epochs_data[compare_epoch]
+                                            compare_epoch_imgs = compare_epochs_data[compare_epoch]
+                                            
+                                            # Find common steps
+                                            selected_steps = {step: img for step, img in selected_epoch_imgs}
+                                            compare_steps = {step: img for step, img in compare_epoch_imgs}
+                                            common_steps = sorted(set(selected_steps.keys()) & set(compare_steps.keys()))
+                                            
+                                            if common_steps:
+                                                compare_step = st.selectbox("Select Step", common_steps, key="compare_step")
+                                                
+                                                if compare_step:
+                                                    col1, col2 = st.columns(2)
+                                                    with col1:
+                                                        st.image(str(selected_steps[compare_step]), 
+                                                               caption=f"{selected_dir_name} - Epoch {compare_epoch}, Step {compare_step}",
+                                                               use_container_width=True)
+                                                    with col2:
+                                                        st.image(str(compare_steps[compare_step]), 
+                                                               caption=f"{compare_dir_name} - Epoch {compare_epoch}, Step {compare_step}",
+                                                               use_container_width=True)
+                                            else:
+                                                st.warning("No common steps found for this epoch")
+                                    else:
+                                        st.warning("No common epochs found between the two results")
+
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Control")
@@ -853,4 +1477,17 @@ with st.sidebar:
             time.sleep(1)
             st.rerun()
     
+    st.divider()
+    
+    st.markdown("### Quick Actions")
+    if st.button("📊 View Results", use_container_width=True):
+        # Switch to results tab
+        st.session_state.active_tab = 5  # Results tab index
+        st.rerun()
+    
+    # Result count
+    result_dirs_data = get_result_directories(RESULT_DIR)
+    st.caption(f"📁 {len(result_dirs_data)} result directories")
+    
+    st.divider()
     st.caption(f"Updated: {datetime.now().strftime('%H:%M:%S')}")

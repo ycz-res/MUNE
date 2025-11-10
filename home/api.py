@@ -2,17 +2,18 @@
 Flask API 服务 - 提供 tasks.json 和 flow 状态的 REST API
 """
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import json
 from pathlib import Path
 from datetime import datetime
+import os
 
 app = Flask(__name__)
 CORS(app)  # 允许跨域请求
 
-TASKS_FILE = 'tasks.json'
-RESULT_DIR = 'result'
+TASKS_FILE = os.path.join(os.path.dirname(__file__), 'tasks.json')
+RESULT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'result')
 
 
 @app.route('/api/tasks', methods=['GET'])
@@ -99,6 +100,109 @@ def get_stats():
         'failed': len(tasks.get('failed', [])),
         'cancelled': len(tasks.get('cancelled', [])),
     })
+
+
+@app.route('/api/results', methods=['GET'])
+def list_results():
+    """列出所有结果目录"""
+    result_path = Path(RESULT_DIR)
+    if not result_path.exists():
+        return jsonify({'results': []})
+    
+    result_dirs = sorted([d for d in result_path.iterdir() if d.is_dir()], 
+                        key=lambda x: x.stat().st_mtime, reverse=True)
+    
+    results = []
+    for dir_path in result_dirs:
+        dir_info = {
+            'name': dir_path.name,
+            'modified': datetime.fromtimestamp(dir_path.stat().st_mtime).isoformat(),
+            'has_train_visual': (dir_path / 'train_visual').exists(),
+            'has_visual': (dir_path / 'visual').exists(),
+            'has_train_json': (dir_path / f'train_{dir_path.name}.json').exists(),
+            'has_test_json': (dir_path / f'test_{dir_path.name}.json').exists(),
+        }
+        
+        # Count images
+        train_visual_dir = dir_path / 'train_visual'
+        if train_visual_dir.exists():
+            dir_info['train_visual_count'] = len(list(train_visual_dir.glob('*.png')))
+        
+        visual_dir = dir_path / 'visual'
+        if visual_dir.exists():
+            dir_info['visual_count'] = len(list(visual_dir.glob('*.png')))
+        
+        results.append(dir_info)
+    
+    return jsonify({'results': results})
+
+
+@app.route('/api/results/<timestamp>/train_visual', methods=['GET'])
+def list_train_visuals(timestamp):
+    """列出训练可视化图片"""
+    result_dir = Path(RESULT_DIR) / timestamp
+    train_visual_dir = result_dir / 'train_visual'
+    
+    if not train_visual_dir.exists():
+        return jsonify({'images': []}), 404
+    
+    images = sorted([f.name for f in train_visual_dir.glob('*.png')])
+    
+    # Group by epoch
+    images_by_epoch = {}
+    for img_name in images:
+        parts = img_name.replace('.png', '').split('_')
+        if len(parts) >= 3 and parts[0] == 'train':
+            try:
+                epoch = int(parts[1])
+                step = int(parts[2])
+                if epoch not in images_by_epoch:
+                    images_by_epoch[epoch] = []
+                images_by_epoch[epoch].append({'name': img_name, 'step': step})
+            except ValueError:
+                continue
+    
+    return jsonify({
+        'images': images,
+        'by_epoch': {str(k): v for k, v in images_by_epoch.items()}
+    })
+
+
+@app.route('/api/results/<timestamp>/train_visual/<image_name>', methods=['GET'])
+def get_train_visual(timestamp, image_name):
+    """获取训练可视化图片"""
+    result_dir = Path(RESULT_DIR) / timestamp
+    image_path = result_dir / 'train_visual' / image_name
+    
+    if not image_path.exists() or not image_path.is_file():
+        return jsonify({'error': 'image not found'}), 404
+    
+    return send_file(str(image_path), mimetype='image/png')
+
+
+@app.route('/api/results/<timestamp>/visual', methods=['GET'])
+def list_visuals(timestamp):
+    """列出测试可视化图片"""
+    result_dir = Path(RESULT_DIR) / timestamp
+    visual_dir = result_dir / 'visual'
+    
+    if not visual_dir.exists():
+        return jsonify({'images': []}), 404
+    
+    images = sorted([f.name for f in visual_dir.glob('*.png')])
+    return jsonify({'images': images})
+
+
+@app.route('/api/results/<timestamp>/visual/<image_name>', methods=['GET'])
+def get_visual(timestamp, image_name):
+    """获取测试可视化图片"""
+    result_dir = Path(RESULT_DIR) / timestamp
+    image_path = result_dir / 'visual' / image_name
+    
+    if not image_path.exists() or not image_path.is_file():
+        return jsonify({'error': 'image not found'}), 404
+    
+    return send_file(str(image_path), mimetype='image/png')
 
 
 if __name__ == '__main__':
