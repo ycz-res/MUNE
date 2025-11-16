@@ -44,11 +44,11 @@ def emd_binary_norm(pred_bin: torch.Tensor, target_bin: torch.Tensor) -> torch.T
 
 def emd_pair(pred_bin: torch.Tensor, 
              target_bin: torch.Tensor,
-             pairing_strategy: PairingStrategyT = "truncate",
-             normalization: str = "per_length") -> torch.Tensor:
+             pairing_strategy: PairingStrategyT = "truncate") -> torch.Tensor:
     """
     配对法 EMD（推土机距离）- 不可导，用于评估指标
     将预测和真实序列中的1进行配对，计算配对位置的距离误差
+    默认按真实标签中1的数量归一化，表示每个真实正样本的平均位置误差
     
     Args:
         pred_bin (torch.Tensor): (B, L) 已二值化 0/1 预测序列
@@ -57,13 +57,9 @@ def emd_pair(pred_bin: torch.Tensor,
             - "truncate": 截断策略，只配对最小数量的1，多余的忽略
             - "sink_right": 多余1配对到右端（位置L）
             - "sink_left": 多余1配对到左端（位置-1）
-        normalization (str): 归一化方式
-            - "per_one": 除以 max(#1_pred, #1_true)
-            - "per_length": 除以序列长度 L
-            - "none": 不归一化
     
     Returns:
-        (B,) 逐样本 EMD 值（torch.Tensor）
+        (B,) 逐样本 EMD 值（torch.Tensor），已按真实标签中1的数量归一化
     """
     if pred_bin.shape != target_bin.shape:
         raise ValueError(f"Shape mismatch: {pred_bin.shape} vs {target_bin.shape}")
@@ -125,13 +121,9 @@ def emd_pair(pred_bin: torch.Tensor,
             
             loss_vec = pair_cost + extra_cost
         
-        # 归一化
-        if normalization == "per_one":
-            denom = torch.maximum(n_pred_ones, n_true_ones).to(torch.float32).clamp_min(1.0)
-            loss_vec = loss_vec / denom
-        elif normalization == "per_length":
-            loss_vec = loss_vec / float(max(L, 1))
-        # "none" 不归一化，直接返回
+        # 归一化：除以真实标签中1的数量，表示每个真实正样本的平均位置误差
+        denom = n_true_ones.to(torch.float32).clamp_min(1.0)
+        loss_vec = loss_vec / denom
     
     return loss_vec
 
@@ -191,14 +183,14 @@ def b_v_metrics(pred_logits: torch.Tensor,
         union = ((pred + target) > 0).float().sum(dim=1)
         iou = intersection / (union + 1e-8)
 
-        # 计算归一化 EMD
-        emd_vec = emd_binary_norm(pred, target)  # (B,)
+        # 计算配对法 EMD（默认按真实标签中1的数量归一化）
+        emd_vec = emd_pair(pred, target, pairing_strategy="truncate")  # (B,)
 
         metrics["Precision"] = precision.mean().item()
         metrics["Recall"] = recall.mean().item()
         metrics["F1"] = f1.mean().item()
         metrics["IoU"] = iou.mean().item()
-        metrics["EMD"] = 1.0 - emd_vec.mean().item()  # 转换为越大越好
+        metrics["EMD"] = emd_vec.mean().item()  # 原始值，越小越好
 
     # -------- Value 模式：F1 + IoU + MAE --------
     elif mode == "value":
@@ -234,8 +226,8 @@ def b_v_metrics(pred_logits: torch.Tensor,
     # 3️⃣ 综合指标（可用于 early stopping 选择最佳 epoch）
     # ============================================================
     if mode == "binary":
-        # 综合评分策略：F1、IoU和EMD（EMD已转换为越大越好）
-        metrics["Score"] = 0.4 * metrics["F1"] + 0.4 * metrics["IoU"] + 0.2 * metrics["EMD"]
+        # 综合评分策略：F1、IoU和EMD（注意：EMD越小越好，所以用1-EMD转换为越大越好）
+        metrics["Score"] = 0.4 * metrics["F1"] + 0.4 * metrics["IoU"] + 0.2 * (1.0 - metrics["EMD"])
 
 
     return metrics

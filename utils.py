@@ -20,36 +20,45 @@ def set_seed(seed: int) -> None:
 _data_cache = {}
 _shuffle_cache = {}
 
-def _stratified_shuffle_indices(labels: np.ndarray, random_state: int = 57) -> np.ndarray:
-    """
-    生成分层洗牌索引，保持各类别比例
-    
-    Args:
-        labels: 标签数组
-        random_state: 随机种子
-        
-    Returns:
-        洗牌后的索引数组
-    """
-    np.random.seed(random_state)
-    
-    # 获取每个类别的索引
-    unique_labels = np.unique(labels)
-    shuffled_indices = []
-    
-    # 对每个类别分别洗牌
-    for label in unique_labels:
-        label_indices = np.where(labels == label)[0]
-        np.random.shuffle(label_indices)
-        shuffled_indices.append(label_indices)
-    
-    # 合并所有类别的索引
-    all_indices = np.concatenate(shuffled_indices)
-    
-    # 再次全局洗牌，打破类别间的顺序
-    np.random.shuffle(all_indices)
-    
-    return all_indices
+def _stratified_shuffle_indices(labels: np.ndarray, random_state: int = 57, block: int = 1) -> np.ndarray:
+    import numpy as np
+    labels = np.asarray(labels)
+    if labels.dtype.kind in "fc":
+        labels = labels.astype(np.int64)
+
+    rng = np.random.default_rng(random_state)
+    n = labels.shape[0]
+
+    uniq, inv = np.unique(labels, return_inverse=True)
+    K = uniq.size
+
+    per_cls = [np.where(inv == c)[0] for c in range(K)]
+    for arr in per_cls:
+        rng.shuffle(arr)
+
+    ptr = [arr.size for arr in per_cls]
+    out = np.empty(n, dtype=np.int64)
+    w = 0
+    alive = [i for i in range(K) if ptr[i] > 0]
+
+    while w < n and alive:
+        order = alive[:]
+        rng.shuffle(order)
+        for c in order:
+            remain = ptr[c]
+            if remain <= 0:
+                continue
+            take = block if remain >= block else remain
+            start = remain - take
+            out[w:w+take] = per_cls[c][start:remain]
+            ptr[c] = start
+            w += take
+            if w >= n:
+                break
+        alive = [i for i in range(K) if ptr[i] > 0]
+
+    return out
+
 
 def load_data(file_path: str, start_ratio: float = 0.0, end_ratio: float = 1.0, 
               shuffle: bool = True, random_state: int = 57):

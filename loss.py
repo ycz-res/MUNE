@@ -4,7 +4,13 @@
 
 任务说明：
 - 真实值：01序列（0或1）
-- 预测值：logits（需sigmoid转换为概率）
+# 统一配置：混合损失包含'weight'字段，单个损失不包含'weight'
+LOSS_CONFIG = {
+    'ce': {'weight': 0.5, 'pos_weight': 5.0},
+    'count': {'weight': 1.0},
+    # 'dice': {'weight': 0.3, 'smooth': 1e-8},
+    # 'iou': {'weight': 0.2, 'smooth': 1e-8},
+}
 - 所有损失函数使用软mask确保可导
 
 损失函数按适合程度排序：
@@ -16,11 +22,48 @@
 import torch
 import torch.nn.functional as F
 
+def _auto_pos_weight(thresholds_target, clip=(1.0, 20.0)):
+    """
+    自动计算 pos_weight = 负样本数 / 正样本数，并夹到 clip 区间。
+    返回标量 Tensor，可直接喂给 BCEWithLogits。
+    """
+    pos = thresholds_target.sum().item()
+    neg = thresholds_target.numel() - pos
+    pw = neg / max(pos, 1.0)
+    pw = max(clip[0], min(clip[1], pw))
+    return torch.tensor(pw, device=thresholds_target.device)
+
+
+def ce(thresholds_pred, thresholds_target, config=None):
+    """
+    交叉熵损失（支持 pos_weight='auto' + pos_weight_clip）
+    config 示例：
+      {'pos_weight': 'auto', 'pos_weight_clip': (1.0, 20.0)}
+      或 {'pos_weight': 5.0}
+    """
+    if config is None:
+        # 允许从全局 LOSS_CONFIG 读取（mixed 会传进来，这里只是兜底）
+        config = LOSS_CONFIG.get('ce', {})
+    target_binary = thresholds_target.float()
+
+    pos_weight_cfg = config.get('pos_weight', None)
+    if isinstance(pos_weight_cfg, str) and pos_weight_cfg.lower() == 'auto':
+        clip = config.get('pos_weight_clip', (1.0, 20.0))
+        pos_weight = _auto_pos_weight(target_binary, clip=clip)
+    elif isinstance(pos_weight_cfg, (int, float)):
+        pos_weight = torch.tensor(float(pos_weight_cfg), device=thresholds_pred.device)
+    else:
+        pos_weight = None
+
+    return F.binary_cross_entropy_with_logits(
+        thresholds_pred, target_binary, pos_weight=pos_weight, reduction='mean'
+    )
+
 # ============================================================================
 # 1. 最合适：基础二分类损失
 # ============================================================================
 
-def ce(thresholds_pred, thresholds_target, config=None):
+def ori_ce(thresholds_pred, thresholds_target, config=None):
     """
     交叉熵损失
 
@@ -177,7 +220,7 @@ def f1(thresholds_pred, thresholds_target, config=None):
 
 def count(thresholds_pred, thresholds_target, config=None):
     """
-    数量损失：计算预测数量和真实数量的差异
+    数量损失：计算预测数量和真实数量的差异（归一化版本）
 
     Args:
         thresholds_pred:   (B, L)  预测 logits
@@ -185,7 +228,7 @@ def count(thresholds_pred, thresholds_target, config=None):
         config:            dict    参数配置，如果为None则从LOSS_CONFIG读取
 
     Returns:
-        count_loss: 标量损失
+        count_loss: 标量损失（已归一化到[0, 1]范围）
     """
     # count损失不需要参数，config参数保留以保持接口统一
     pred_prob = torch.sigmoid(thresholds_pred)
@@ -194,7 +237,9 @@ def count(thresholds_pred, thresholds_target, config=None):
     true_mask = thresholds_target.float()
     true_counts = true_mask.sum(dim=1)
 
-    count_loss = torch.mean(torch.abs(pred_counts - true_counts))
+    # 归一化：除以序列长度，使损失范围从[0, L]变为[0, 1]
+    seq_length = thresholds_pred.shape[1]
+    count_loss = torch.mean(torch.abs(pred_counts - true_counts)) / seq_length
     return count_loss
 
 
@@ -491,7 +536,7 @@ def mixed(thresholds_pred, thresholds_target, loss_config=None):
 
 # 统一配置：混合损失包含'weight'字段，单个损失不包含'weight'
 LOSS_CONFIG = {
-    'ce': {'weight': 0.5, 'pos_weight': 5.0},
-    'dice': {'weight': 0.3, 'smooth': 1e-8},
-    'iou': {'weight': 0.2, 'smooth': 1e-8},
+    'ce':    {'weight': 1.0, 'pos_weight':'auto', 'pos_weight_clip': (8.0, 15.0)},
+    'count': {'weight': 0.05},
 }
+

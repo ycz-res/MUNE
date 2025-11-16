@@ -57,8 +57,6 @@ class Sim(Dataset):
         # 直接使用load_data函数加载数据
         data_dict = load_data(
             file_path=self.data_path,
-            start_ratio=self.start_percent,
-            end_ratio=self.end_percent,
             shuffle=True,
             random_state=57
         )

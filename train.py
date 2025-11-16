@@ -34,7 +34,7 @@ def get_args_parser():
     a_parser.add_argument('--num_workers', default=8, type=int, help='Number of data loading workers')
     a_parser.add_argument('--pin_memory', default=True, type=bool, help='Pin memory for data loading')
     a_parser.add_argument('--device', default='cuda', type=str, help='Device to use (cpu/cuda)')
-    a_parser.add_argument('--lr', default=1e-4, type=float, help='Learning rate')
+    a_parser.add_argument('--lr', default=1e-3, type=float, help='Learning rate')
     a_parser.add_argument('--weight_decay', default=1e-3, type=float, help='Weight decay (L2 regularization)')
     a_parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0=disabled)')
     a_parser.add_argument('--patience', default=20, type=int, help='Early stopping patience')
@@ -48,7 +48,7 @@ def get_args_parser():
     a_parser.add_argument('--timestamp', default=None, type=str, help='Experiment timestamp (e.g., 20251023_123456). If not provided, auto-generate')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
-    a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.5 is standard, consistent with test)')
+    a_parser.add_argument('--metrics_threshold', default=0.65, type=float, help='Threshold for metrics calculation (0.5 is standard, consistent with test)')
     a_parser.add_argument('--d_model', default=128, type=int, help='Model hidden dimension (default: 128, larger for better capacity)')
     a_parser.add_argument('--lr_scheduler', default='cosine', choices=['none', 'cosine', 'plateau'], help='Learning rate scheduler type')
     a_parser.add_argument('--warmup_epochs', default=5, type=int, help='Warmup epochs for cosine scheduler')
@@ -147,7 +147,7 @@ def main(args):
         print(f"📈 使用Cosine学习率调度器 (Warmup={args.warmup_epochs} epochs)")
     elif args.lr_scheduler == 'plateau':
         from torch.optim.lr_scheduler import ReduceLROnPlateau
-        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
         print(f"📈 使用Plateau学习率调度器 (patience=5)")
     else:
         scheduler = None
