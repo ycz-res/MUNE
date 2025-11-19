@@ -267,6 +267,98 @@ def count(thresholds_pred, thresholds_target, config=None):
 
 def emd(thresholds_pred, thresholds_target, config=None):
     """
+    改进版 1D EMD 损失：
+    总 loss = w_emd * 形状EMD + w_bce * 带正类权重的BCE
+
+    Args:
+        thresholds_pred:   (B, L) logits
+        thresholds_target: (B, L) 0/1 或非负
+        config:
+            - eps: float, 数值稳定项，默认 1e-8
+            - reduction: "mean" | "sum" | "none"
+            - ignore_empty: bool, 是否忽略全 0 样本（按 target 判断）
+            - w_emd: float, EMD 形状项权重（默认 1.0）
+            - w_bce: float, BCE 项权重（默认 0.5~1.0 建议先 0.5）
+            - pos_weight: float, 正类权重，处理“模型爱全 0”（默认 3.0）
+    """
+    if config is None:
+        config = {}
+
+    eps         = config.get("eps", 1e-8)
+    reduction   = config.get("reduction", "mean")
+    ignore_empty= config.get("ignore_empty", True)
+    w_emd       = config.get("w_emd", 1.0)
+    w_bce       = config.get("w_bce", 0.5)
+    pos_w_value = config.get("pos_weight", 3.0)   # 正类权重大一点，克制“全 0”
+
+    # ---- 1. logits -> prob, 准备好 true ----
+    pred = torch.sigmoid(thresholds_pred)        # (B, L)
+    true = thresholds_target.float()             # (B, L)
+
+    B, L = pred.shape
+
+    # ---- 2. 形状 EMD（和你原来的版本保持一致思想）----
+    pred_mass = pred.sum(dim=1, keepdim=True)    # (B, 1)
+    true_mass = true.sum(dim=1, keepdim=True)    # (B, 1)
+
+    pred_dist = pred / (pred_mass + eps)
+    true_dist = true / (true_mass + eps)
+
+    cdf_pred = torch.cumsum(pred_dist, dim=1)
+    cdf_true = torch.cumsum(true_dist, dim=1)
+
+    emd_shape = (cdf_pred - cdf_true).abs().mean(dim=1)   # (B,)
+
+    # ---- 3. BCE 项：直接对每个位置做 0/1 分类 ----
+    #   使用 pos_weight 提高“把 1 预测成 0”的惩罚，克服“全 0”偏好
+    pos_weight = torch.full(
+        (L,),
+        fill_value=pos_w_value,
+        device=thresholds_pred.device,
+        dtype=thresholds_pred.dtype,
+    )  # 形状 (L,)，会按列广播到 (B, L)
+
+    bce = F.binary_cross_entropy_with_logits(
+        thresholds_pred,
+        true,
+        reduction="none",
+        pos_weight=pos_weight,
+    )   # (B, L)
+
+    bce_per_sample = bce.mean(dim=1)            # (B,)
+
+    # ---- 4. 按样本组合总 loss ----
+    loss_per_sample = w_emd * emd_shape + w_bce * bce_per_sample   # (B,)
+
+    # ---- 5. 处理“target 全 0”的样本（很多时候你不关心这些）----
+    if ignore_empty:
+        non_empty_mask = (true_mass.squeeze(1) > eps).float()   # (B,)
+        loss_per_sample = loss_per_sample * non_empty_mask
+
+        if reduction == "none":
+            return loss_per_sample
+
+        total = loss_per_sample.sum()
+        denom = non_empty_mask.sum().clamp_min(1.0)
+        if reduction == "mean":
+            return total / denom
+        elif reduction == "sum":
+            return total
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}")
+    else:
+        if reduction == "none":
+            return loss_per_sample
+        elif reduction == "mean":
+            return loss_per_sample.mean()
+        elif reduction == "sum":
+            return loss_per_sample.sum()
+        else:
+            raise ValueError(f"Unsupported reduction: {reduction}")
+
+
+def emd_ori(thresholds_pred, thresholds_target, config=None):
+    """
     EMD损失：前缀流量法，衡量分布差异
 
     Args:
@@ -507,6 +599,12 @@ def mixed(thresholds_pred, thresholds_target, loss_config=None):
         'tversky': tversky,
         'focal_tversky': focal_tversky,
         'combo': combo,
+        # 新增：基于序列整体性的损失
+        'binary_numeric': binary_numeric,
+        'position_weighted_bce': position_weighted_bce,
+        'set_matching': set_matching,
+        'ordered_position': ordered_position,
+        'combined_sequence': combined_sequence,
     }
 
     # 计算各个损失
@@ -557,10 +655,323 @@ def mixed(thresholds_pred, thresholds_target, loss_config=None):
 # Loss配置字典
 # ============================================================================
 
+# ============================================================================
+# 基于序列整体性的损失函数（将01序列看作整体）
+# ============================================================================
+
+def binary_numeric(thresholds_pred, thresholds_target, config=None):
+    """
+    二进制数值损失：将01序列转换为归一化的数值，计算数值差异
+    
+    思路：
+    - 将500维01序列看作500位二进制数
+    - 使用位置权重：位置i的权重为 w_i = 2^i / (2^500 - 1) 归一化
+    - 或者使用线性权重：w_i = i / sum(0..499)
+    - 计算加权和作为"数值"，然后计算差异
+    
+    Args:
+        thresholds_pred:   (B, L)  预测 logits
+        thresholds_target: (B, L)  真实标签 01序列
+        config:            dict    参数配置
+            - weight_mode: 'exponential' (2^i) 或 'linear' (i) 或 'uniform' (1)
+            - normalize: bool, 是否归一化权重
+    
+    Returns:
+        numeric_loss: 标量损失
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('binary_numeric', {})
+    
+    weight_mode = config.get('weight_mode', 'linear')  # 'exponential', 'linear', 'uniform'
+    normalize = config.get('normalize', True)
+    
+    B, L = thresholds_pred.shape
+    device = thresholds_pred.device
+    
+    # 创建位置权重
+    if weight_mode == 'exponential':
+        # 指数权重：2^i，但需要归一化避免数值溢出
+        positions = torch.arange(L, dtype=torch.float32, device=device)
+        weights = torch.pow(2.0, positions)
+        if normalize:
+            weights = weights / weights.sum()  # 归一化到[0,1]
+    elif weight_mode == 'linear':
+        # 线性权重：位置越靠后权重越大
+        positions = torch.arange(L, dtype=torch.float32, device=device)
+        weights = positions + 1.0  # 从1到L
+        if normalize:
+            weights = weights / weights.sum()
+    else:  # uniform
+        # 均匀权重
+        weights = torch.ones(L, dtype=torch.float32, device=device) / L
+    
+    # 将预测转换为概率
+    pred_prob = torch.sigmoid(thresholds_pred)
+    target_binary = thresholds_target.float()
+    
+    # 计算加权数值
+    pred_numeric = (pred_prob * weights).sum(dim=1)  # (B,)
+    target_numeric = (target_binary * weights).sum(dim=1)  # (B,)
+    
+    # 计算数值差异（L1或L2）
+    loss_mode = config.get('loss_mode', 'l1')  # 'l1' 或 'l2'
+    if loss_mode == 'l2':
+        numeric_loss = torch.mean((pred_numeric - target_numeric) ** 2)
+    else:  # l1
+        numeric_loss = torch.mean(torch.abs(pred_numeric - target_numeric))
+    
+    return numeric_loss
+
+
+def position_weighted_bce(thresholds_pred, thresholds_target, config=None):
+    """
+    位置加权BCE损失：不同位置有不同的重要性权重
+    
+    思路：
+    - 位置越靠后（阈值越大），权重越大
+    - 或者使用指数权重，强调高阈值位置
+    
+    Args:
+        thresholds_pred:   (B, L)  预测 logits
+        thresholds_target: (B, L)  真实标签 01序列
+        config:            dict    参数配置
+            - weight_mode: 'exponential', 'linear', 'quadratic'
+            - pos_weight: float, 正样本额外权重
+            - normalize: bool, 是否归一化位置权重
+    
+    Returns:
+        weighted_bce_loss: 标量损失
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('position_weighted_bce', {})
+    
+    weight_mode = config.get('weight_mode', 'linear')
+    pos_weight = config.get('pos_weight', None)
+    normalize = config.get('normalize', True)
+    
+    B, L = thresholds_pred.shape
+    device = thresholds_pred.device
+    
+    # 创建位置权重
+    positions = torch.arange(L, dtype=torch.float32, device=device)
+    if weight_mode == 'exponential':
+        weights = torch.exp(positions / L)  # 指数增长
+    elif weight_mode == 'quadratic':
+        weights = (positions + 1.0) ** 2
+    else:  # linear
+        weights = positions + 1.0
+    
+    if normalize:
+        weights = weights / weights.mean()  # 归一化，保持均值不变
+    
+    # 扩展维度以匹配batch
+    weights = weights.view(1, L)  # (1, L)
+    
+    # 计算逐位置的BCE
+    target_binary = thresholds_target.float()
+    bce_per_pos = F.binary_cross_entropy_with_logits(
+        thresholds_pred, target_binary, reduction='none'
+    )  # (B, L)
+    
+    # 应用位置权重
+    weighted_bce = (bce_per_pos * weights).mean()
+    
+    # 如果提供了pos_weight，可以额外加权正样本
+    if pos_weight is not None:
+        pos_mask = target_binary > 0.5
+        pos_weight_tensor = torch.where(pos_mask, pos_weight, 1.0)
+        weighted_bce = (bce_per_pos * weights * pos_weight_tensor).mean()
+    
+    return weighted_bce
+
+
+def set_matching(thresholds_pred, thresholds_target, config=None):
+    """
+    集合匹配损失：将01序列看作集合（1的位置），计算集合差异
+    
+    思路：
+    - 提取1的位置作为集合
+    - 计算集合的交集、并集、差集
+    - 使用Jaccard距离或集合差异
+    
+    Args:
+        thresholds_pred:   (B, L)  预测 logits
+        thresholds_target: (B, L)  真实标签 01序列
+        config:            dict    参数配置
+            - threshold: float, 用于二值化预测的阈值
+            - mode: 'jaccard', 'dice', 'symmetric_diff'
+    
+    Returns:
+        set_loss: 标量损失
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('set_matching', {})
+    
+    threshold = config.get('threshold', 0.5)
+    mode = config.get('mode', 'jaccard')
+    smooth = config.get('smooth', 1e-8)
+    
+    # 二值化预测
+    pred_prob = torch.sigmoid(thresholds_pred)
+    pred_binary = (pred_prob >= threshold).float()
+    target_binary = thresholds_target.float()
+    
+    if mode == 'jaccard':
+        # Jaccard距离 = 1 - Jaccard相似度
+        intersection = (pred_binary * target_binary).sum(dim=1)  # (B,)
+        union = ((pred_binary + target_binary) > 0).float().sum(dim=1)  # (B,)
+        jaccard = (intersection + smooth) / (union + smooth)
+        set_loss = torch.mean(1.0 - jaccard)
+    
+    elif mode == 'dice':
+        # Dice距离 = 1 - Dice相似度
+        intersection = (pred_binary * target_binary).sum(dim=1)
+        pred_sum = pred_binary.sum(dim=1)
+        target_sum = target_binary.sum(dim=1)
+        dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
+        set_loss = torch.mean(1.0 - dice)
+    
+    else:  # symmetric_diff
+        # 对称差：|A Δ B| = |A ∪ B| - |A ∩ B|
+        intersection = (pred_binary * target_binary).sum(dim=1)
+        union = ((pred_binary + target_binary) > 0).float().sum(dim=1)
+        sym_diff = union - intersection
+        # 归一化：除以序列长度
+        set_loss = torch.mean(sym_diff.float() / thresholds_pred.shape[1])
+    
+    return set_loss
+
+
+def ordered_position(thresholds_pred, thresholds_target, config=None):
+    """
+    有序位置损失：考虑1的位置顺序，强调位置顺序的重要性
+    
+    思路：
+    - 提取1的位置索引，按顺序排列
+    - 计算位置序列的差异（如L1距离）
+    - 或者使用排序损失
+    
+    Args:
+        thresholds_pred:   (B, L)  预测 logits
+        thresholds_target: (B, L)  真实标签 01序列
+        config:            dict    参数配置
+            - threshold: float, 用于二值化预测的阈值
+            - mode: 'l1', 'l2', 'rank'
+    
+    Returns:
+        ordered_loss: 标量损失
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('ordered_position', {})
+    
+    threshold = config.get('threshold', 0.5)
+    mode = config.get('mode', 'l1')
+    smooth = config.get('smooth', 1e-8)
+    
+    # 二值化预测
+    pred_prob = torch.sigmoid(thresholds_pred)
+    pred_binary = (pred_prob >= threshold).float()
+    target_binary = thresholds_target.float()
+    
+    B, L = thresholds_pred.shape
+    device = thresholds_pred.device
+    
+    # 创建位置索引
+    positions = torch.arange(L, dtype=torch.float32, device=device).view(1, L)  # (1, L)
+    
+    if mode == 'rank':
+        # 排序损失：计算位置加权差异
+        # 对于每个样本，计算预测和真实位置序列的差异
+        pred_positions = (pred_binary * positions).sum(dim=1) / (pred_binary.sum(dim=1) + smooth)  # (B,)
+        target_positions = (target_binary * positions).sum(dim=1) / (target_binary.sum(dim=1) + smooth)  # (B,)
+        ordered_loss = torch.mean(torch.abs(pred_positions - target_positions))
+    
+    else:
+        # L1或L2：直接计算位置加权差异
+        pred_weighted = (pred_binary * positions).sum(dim=1)  # (B,)
+        target_weighted = (target_binary * positions).sum(dim=1)  # (B,)
+        
+        if mode == 'l2':
+            ordered_loss = torch.mean((pred_weighted - target_weighted) ** 2) / (L ** 2)  # 归一化
+        else:  # l1
+            ordered_loss = torch.mean(torch.abs(pred_weighted - target_weighted)) / L  # 归一化
+    
+    return ordered_loss
+
+
+def combined_sequence(thresholds_pred, thresholds_target, config=None):
+    """
+    组合序列损失：结合多种序列整体性损失
+    
+    思路：
+    - 结合位置加权、集合匹配、有序位置等多种损失
+    - 可以灵活配置权重
+    
+    Args:
+        thresholds_pred:   (B, L)  预测 logits
+        thresholds_target: (B, L)  真实标签 01序列
+        config:            dict    参数配置
+            - weights: dict, 各损失函数的权重
+                {'position_weighted': 0.4, 'set_matching': 0.3, 'ordered': 0.3}
+    
+    Returns:
+        dict: {'total': 总损失, 'losses': 各损失值}
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('combined_sequence', {})
+    
+    weights = config.get('weights', {
+        'position_weighted': 0.4,
+        'set_matching': 0.3,
+        'ordered': 0.3
+    })
+    
+    losses = {}
+    total_loss = 0.0
+    
+    # 位置加权BCE
+    if 'position_weighted' in weights:
+        pos_config = config.get('position_weighted_config', {'weight_mode': 'linear'})
+        loss_val = position_weighted_bce(thresholds_pred, thresholds_target, pos_config)
+        losses['position_weighted'] = loss_val
+        total_loss += weights['position_weighted'] * loss_val
+    
+    # 集合匹配
+    if 'set_matching' in weights:
+        set_config = config.get('set_matching_config', {'mode': 'jaccard'})
+        loss_val = set_matching(thresholds_pred, thresholds_target, set_config)
+        losses['set_matching'] = loss_val
+        total_loss += weights['set_matching'] * loss_val
+    
+    # 有序位置
+    if 'ordered' in weights:
+        ord_config = config.get('ordered_config', {'mode': 'l1'})
+        loss_val = ordered_position(thresholds_pred, thresholds_target, ord_config)
+        losses['ordered'] = loss_val
+        total_loss += weights['ordered'] * loss_val
+    
+    return {
+        'total': total_loss,
+        'losses': losses
+    }
+
+
 # 统一配置：混合损失包含'weight'字段，单个损失不包含'weight'
 LOSS_CONFIG = {
     'ce':       {'weight': 1.0, 'pos_weight': 40.0},
     'focal_ce': {'weight': 1.0, 'alpha': 0.25, 'gamma': 2.0},
     'count':    {'weight': 0.05},
+    # 新增：基于序列整体性的损失
+    'binary_numeric': {'weight': 0.3, 'weight_mode': 'linear', 'loss_mode': 'l1', 'normalize': True},
+    'position_weighted_bce': {'weight': 0.5, 'weight_mode': 'linear', 'pos_weight': 10.0, 'normalize': True},
+    'set_matching': {'weight': 0.3, 'threshold': 0.5, 'mode': 'jaccard', 'smooth': 1e-8},
+    'ordered_position': {'weight': 0.2, 'threshold': 0.5, 'mode': 'l1'},
+    'combined_sequence': {
+        'weight': 1.0,
+        'weights': {'position_weighted': 0.4, 'set_matching': 0.3, 'ordered': 0.3},
+        'position_weighted_config': {'weight_mode': 'linear', 'pos_weight': 10.0},
+        'set_matching_config': {'mode': 'jaccard'},
+        'ordered_config': {'mode': 'l1'}
+    },
 }
 

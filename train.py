@@ -48,7 +48,7 @@ def get_args_parser():
     a_parser.add_argument('--timestamp', default=None, type=str, help='Experiment timestamp (e.g., 20251023_123456). If not provided, auto-generate')
     a_parser.add_argument('--threshold_mode', default='binary', choices=['value', 'binary'], help='Threshold output mode: binary=0/1 mask, value=actual threshold values')
     a_parser.add_argument('--dataset_type', default='Sim', choices=['Sim', 'Real'], help='Dataset type')
-    a_parser.add_argument('--metrics_threshold', default=0.65, type=float, help='Threshold for metrics calculation (0.5 is standard, consistent with test)')
+    a_parser.add_argument('--metrics_threshold', default=0.5, type=float, help='Threshold for metrics calculation (0.5 is standard, consistent with test)')
     a_parser.add_argument('--d_model', default=128, type=int, help='Model hidden dimension (default: 128, larger for better capacity)')
     a_parser.add_argument('--lr_scheduler', default='cosine', choices=['none', 'cosine', 'plateau'], help='Learning rate scheduler type')
     a_parser.add_argument('--warmup_epochs', default=5, type=int, help='Warmup epochs for cosine scheduler')
