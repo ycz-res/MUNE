@@ -59,6 +59,28 @@ def ce(thresholds_pred, thresholds_target, config=None):
         thresholds_pred, target_binary, pos_weight=pos_weight, reduction='mean'
     )
 
+
+def focal_ce(thresholds_pred, thresholds_target, config=None):
+    """
+    Focal Cross-Entropy 损失，缓解正负样本不平衡
+    config: {'alpha': 0.25, 'gamma': 2.0}
+    """
+    if config is None:
+        config = LOSS_CONFIG.get('focal_ce', {})
+    alpha = float(config.get('alpha', 0.25))
+    gamma = float(config.get('gamma', 2.0))
+
+    target_binary = thresholds_target.float()
+    pred_prob = torch.sigmoid(thresholds_pred)
+    ce = F.binary_cross_entropy_with_logits(
+        thresholds_pred, target_binary, reduction='none'
+    )
+
+    p_t = pred_prob * target_binary + (1.0 - pred_prob) * (1.0 - target_binary)
+    alpha_t = alpha * target_binary + (1.0 - alpha) * (1.0 - target_binary)
+    focal_loss = alpha_t * ((1.0 - p_t).clamp(min=1e-8) ** gamma) * ce
+    return focal_loss.mean()
+
 # ============================================================================
 # 1. 最合适：基础二分类损失
 # ============================================================================
@@ -474,6 +496,7 @@ def mixed(thresholds_pred, thresholds_target, loss_config=None):
     available_losses = {
         'ce': ce,
         'weighted_bce': weighted_bce,
+        'focal_ce': focal_ce,
         'dice': dice,
         'iou': iou,
         'f1': f1,
@@ -536,7 +559,8 @@ def mixed(thresholds_pred, thresholds_target, loss_config=None):
 
 # 统一配置：混合损失包含'weight'字段，单个损失不包含'weight'
 LOSS_CONFIG = {
-    'ce':    {'weight': 1.0, 'pos_weight':'auto', 'pos_weight_clip': (8.0, 15.0)},
-    'count': {'weight': 0.05},
+    'ce':       {'weight': 1.0, 'pos_weight': 40.0},
+    'focal_ce': {'weight': 1.0, 'alpha': 0.25, 'gamma': 2.0},
+    'count':    {'weight': 0.05},
 }
 

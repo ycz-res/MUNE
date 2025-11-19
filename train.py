@@ -39,7 +39,7 @@ def get_args_parser():
     a_parser.add_argument('--grad_clip', default=1.0, type=float, help='Gradient clipping value (0=disabled)')
     a_parser.add_argument('--patience', default=20, type=int, help='Early stopping patience')
     a_parser.add_argument('--loss_type', default='emd', 
-                         choices=['ce', 'weighted_bce', 'dice', 'iou', 'f1', 'count', 'emd', 'hamming',
+                         choices=['ce', 'weighted_bce', 'focal_ce', 'dice', 'iou', 'f1', 'count', 'emd', 'hamming',
                                  'jaccard', 'tversky', 'focal_tversky', 'combo', 'mixed'],
                          help='Loss function type. Available: ce, weighted_bce, dice, iou, f1, count, emd, hamming, jaccard, tversky, focal_tversky, combo, mixed (mixed uses LOSS_CONFIG from loss.py)')
     a_parser.add_argument('--model_type', default='LSTM', choices=['Linear', 'CNN', 'LSTM', 'MUNECNN', 'Transformer'], help='Model architecture type')
